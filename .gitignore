@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv-*/
+.deps/
 venv/
 .env
 .env.*
@@ -14,14 +16,24 @@ node_modules/
 dist/
 build/
 .vite/
+*.tsbuildinfo
 
 # Local outputs and uploads
 backend/storage/uploads/*
 backend/storage/downloaded_directives/*
 backend/storage/generated_outputs/*
+backend/storage/ocr_cache/*
+backend/storage/regulatory_text_breakdowns/*
+backend/storage/obligation_registers/*
+backend/storage/gap_assessments/*
+backend/taxonomy/*.xlsx
 !backend/storage/uploads/.gitkeep
 !backend/storage/downloaded_directives/.gitkeep
 !backend/storage/generated_outputs/.gitkeep
+!backend/storage/regulatory_text_breakdowns/.gitkeep
+!backend/storage/obligation_registers/.gitkeep
+!backend/storage/gap_assessments/.gitkeep
+!backend/taxonomy/.gitkeep
 
 # OS / IDE
 .DS_Store

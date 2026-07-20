@@ -1,7 +1,7 @@
 from pathlib import Path
 import traceback
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
@@ -16,22 +16,34 @@ def available_registers():
     settings = get_settings()
     docs = []
     for ext in ("*.xlsx", "*.csv"):
-        docs.extend({"name": p.name, "size_bytes": p.stat().st_size} for p in sorted(settings.output_dir.glob(ext)))
+        docs.extend(
+            {"name": p.name, "size_bytes": p.stat().st_size}
+            for p in sorted(settings.output_dir.glob(ext))
+            if "obligation_extraction" in p.stem and "policy_gap_assessment" not in p.stem
+        )
     return {"registers": docs}
 
 
 @router.post("/review")
 def gap_review(
-    register: UploadFile = File(...),
+    register_file: UploadFile | None = File(default=None, alias="register"),
+    register_name: str | None = Form(default=None),
     policy: UploadFile = File(...),
 ):
     settings = get_settings()
     try:
-        if not register.filename or not register.filename.lower().endswith((".xlsx", ".xls", ".csv")):
-            raise HTTPException(status_code=400, detail="Upload an Excel or CSV obligation register.")
         if not policy.filename or not policy.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Upload the internal policy as a PDF.")
-        register_path = save_upload(register.file, register.filename, settings.uploads_dir)
+        if register_file and register_file.filename:
+            if not register_file.filename.lower().endswith((".xlsx", ".xls", ".csv")):
+                raise HTTPException(status_code=400, detail="Upload an Excel or CSV obligation register.")
+            register_path = save_upload(register_file.file, register_file.filename, settings.uploads_dir)
+        elif register_name:
+            register_path = settings.output_dir / Path(register_name).name
+            if not register_path.exists() or register_path.suffix.lower() not in {".xlsx", ".xls", ".csv"}:
+                raise HTTPException(status_code=404, detail="Selected obligation register was not found.")
+        else:
+            raise HTTPException(status_code=400, detail="Select a generated register or upload an Excel/CSV register.")
         policy_path = save_upload(policy.file, policy.filename, settings.uploads_dir)
         return review_policy_gaps(register_path, policy_path)
     except HTTPException:
