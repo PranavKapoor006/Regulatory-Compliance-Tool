@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import fitz
@@ -9,7 +11,16 @@ import pandas as pd
 
 from app.services.breakdown_service import breakdown_regulatory_text
 from app.services.crawler_service import CrawlerService
-from app.services.gap_service import VALID_STATUSES, chunk_policy_text, review_policy_gaps
+from app.services.gap_service import (
+    VALID_STATUSES,
+    _apply_gemini_assessment,
+    _is_structural_parent,
+    _jurisdiction_mismatch,
+    chunk_policy_text,
+    coverage_status,
+    recommendation_for,
+    review_policy_gaps,
+)
 from app.services.obligation_service import extract_obligations_from_pdf
 
 
@@ -123,6 +134,10 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual(row["Corresponding Policy Text"], "")
                 if row["Section"] == "1.1" and row["Coverage Status"] == "Completely Covered":
                     self.assertEqual(row["Policy Gap and Recommendations"], "")
+            output = Path(__file__).resolve().parents[1] / "storage" / "generated_outputs" / result["output_files"]["excel"]
+            with pd.ExcelFile(output) as workbook:
+                self.assertEqual(workbook.sheet_names, ["Executive Summary", "Gap Assessment", "Statistics", "Process Log"])
+            self.assertIn("Review Rationale", rows[0])
 
     def test_policy_page_markers_support_native_and_ocr_formats(self) -> None:
         chunks = chunk_policy_text(
@@ -130,6 +145,105 @@ class WorkflowTests(unittest.TestCase):
             "--- Page 2 | method=ocr | rotation=90 ---\n2. Second policy section."
         )
         self.assertEqual({chunk["page"] for chunk in chunks}, {"1", "2"})
+
+    def test_foreign_regulator_evidence_cannot_prove_fsca_coverage(self) -> None:
+        directive = "The insurer must notify the Registrar before outsourcing this South African insurance function."
+        evidence = "The company shall notify the Saudi Arabia Insurance Authority before outsourcing."
+        self.assertTrue(_jurisdiction_mismatch(directive, directive, evidence))
+        self.assertEqual(coverage_status(0.9, 0.8, evidence, True), "Partially Covered")
+
+    def test_fallback_recommendation_uses_material_gaps_not_random_words(self) -> None:
+        directive = "This Directive applies to all aspects of the insurance business that are outsourced, but does not apply to intermediary services."
+        obligation = "The South African insurer must apply Directive 159 to the defined outsourcing scope."
+        evidence = "The policy discusses general outsourcing risk for Saudi Arabia."
+        recommendation = recommendation_for(
+            "Partially Covered",
+            obligation,
+            section="3.2",
+            directive_text=directive,
+            evidence=evidence,
+        )
+        self.assertIn("South African", recommendation)
+        self.assertIn("intermediary services", recommendation)
+        self.assertNotIn("Explicitly address the missing elements", recommendation)
+        self.assertNotIn("applicability, scope, provision, applies", recommendation)
+
+    def test_unfinished_parent_stem_is_assessed_through_children(self) -> None:
+        register = pd.DataFrame([
+            {"Section": "7.2", "Language from Directive": "An outsourcing policy must, at least —"},
+            {"Section": "7.2.1", "Language from Directive": "set out the outsourcing governance requirements;"},
+        ])
+        self.assertTrue(_is_structural_parent(register, 0))
+
+    def test_gemini_assessment_is_grounded_and_jurisdiction_validated(self) -> None:
+        evidence = "The policy requires notification to the Saudi Arabia Insurance Authority before outsourcing."
+        task = {
+            "id": "row-1",
+            "section": "8.1",
+            "directive_text": "The insurer must notify the Registrar before outsourcing under this Directive.",
+            "obligation": "The insurer must notify the South African Registrar before outsourcing.",
+            "candidates": [{
+                "candidate_id": "candidate-1", "page": "4", "text": evidence,
+                "score": 0.8, "keyword_score": 0.7, "hits": ["notify", "outsourcing"],
+            }],
+        }
+        assessment = {
+            "coverage_status": "Completely Covered",
+            "candidate_id": "candidate-1",
+            "evidence_quote": "requires notification to the Saudi Arabia Insurance Authority before outsourcing",
+            "rationale": "The policy has a notification control, but it names a foreign regulator.",
+            "recommendation": "Add an FSCA notification clause for South African outsourcing arrangements.",
+        }
+        result = _apply_gemini_assessment(task, assessment)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "Partially Covered")
+        self.assertEqual(result["page"], "4")
+        self.assertIn("Saudi Arabia Insurance Authority", result["evidence"])
+
+    def test_review_workflow_uses_validated_gemini_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            register = root / "register.csv"
+            pd.DataFrame([{
+                "Section": "3.2",
+                "Language from Directive": "Directive 159 applies to all outsourced aspects of the South African insurance business but excludes intermediary services.",
+                "Obligation": "The insurer must define the South African scope of Directive 159 outsourcing requirements.",
+                "Obligation Category": "Regulatory Compliance",
+                "Primary Responsible Department": "Legal & Compliance",
+                "Support Function": "Regulatory Compliance",
+                "Priority": "High",
+                "Actionable": "Yes",
+            }]).to_csv(register, index=False)
+            policy = root / "Policy.pdf"
+            make_pdf(policy, [
+                "SCOPE\nThe policy applies to material outsourcing arrangements in Saudi Arabia. "
+                "Business owners must identify material arrangements and document the applicable internal approval before implementation. "
+                "The compliance function maintains the outsourcing register and reviews it annually."
+            ])
+            gemini_response = {
+                "assessments": [{
+                    "id": "row-0",
+                    "coverage_status": "Partially Covered",
+                    "candidate_id": "candidate-1",
+                    "evidence_quote": "The policy applies to material outsourcing arrangements in Saudi Arabia.",
+                    "rationale": "The policy defines outsourcing scope, but only for Saudi Arabia and without the intermediary-services exclusion.",
+                    "recommendation": "Add a South African scope clause stating that Directive 159 applies to every outsourced aspect of the insurer's insurance business and expressly excludes intermediary services.",
+                }]
+            }
+            ranked = [{
+                "candidate_id": "candidate-1", "page": "1",
+                "text": "The policy applies to material outsourcing arrangements in Saudi Arabia.",
+                "score": 0.8, "keyword_score": 0.6, "hits": ["outsourcing"],
+            }]
+            with patch.dict(os.environ, {"ENABLE_LLM_GAP_REVIEW": "true"}), patch(
+                "app.services.gap_service.chat_json", return_value=gemini_response
+            ), patch("app.services.gap_service.rank_policy_matches", return_value=ranked):
+                result = review_policy_gaps(register, policy)
+            row = result["tabs"]["gap_assessment"][0]
+            self.assertEqual(row["Coverage Status"], "Partially Covered")
+            self.assertIn("expressly excludes intermediary services", row["Policy Gap and Recommendations"])
+            self.assertIn("Saudi Arabia", row["Corresponding Policy Text"])
+            self.assertIn("Gemini produced 1 validated assessment", result["logs"][2]["message"])
 
 
 if __name__ == "__main__":

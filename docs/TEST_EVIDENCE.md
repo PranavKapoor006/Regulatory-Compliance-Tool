@@ -1,9 +1,9 @@
-# Test evidence — 20 July 2026
+# Test evidence — 21 July 2026
 
 ## Automated
 
 - Python compile check completed for all backend modules and tests.
-- Backend unit/API suite: 9 tests executed.
+- Backend unit/API suite: 14 tests executed.
 - Frontend TypeScript and Vite production build completed successfully.
 - Production bundle generated successfully (`dist/index.html`, CSS, and JavaScript assets).
 
@@ -24,6 +24,7 @@
 - Directive 159 OCR: 10 scanned pages; rotation correction selected 90 degrees where required.
 - Directive 159 cleaned breakdown: 94 rows including Introduction and Annexure A.
 - OCR corrections verified for `5.1.2`, parent `7.5`, and children `7.5.1`–`7.5.9`.
+- Unfinished parent clauses are retained for traceability but identified as non-actionable; their numbered child clauses carry the assessable requirements.
 - OCR cache verification: cached read completed in approximately 0.001 seconds after the first full pass.
 - Excel workbook sheet names verified: Obligations, Text Breakdown, Statistics, Process Log.
 
@@ -33,7 +34,12 @@
 - Only three coverage statuses produced.
 - KPI status totals reconciled exactly to Total Obligations.
 - Completely missing rows contain no fabricated policy text/page evidence.
-- Excel workbook sheet names verified: Gap Assessment, Statistics, Process Log.
+- Jurisdiction safeguards prevent evidence about a foreign regulator from being treated as full coverage of an FSCA/FSB obligation.
+- Grounded Gemini responses are accepted only when they use an allowed evidence candidate and reproduce an exact policy quotation.
+- Invalid or unavailable Gemini output falls back to the deterministic reviewer without stopping workbook generation.
+- Recommendations describe the substantive policy change required and do not expose raw keyword-difference lists.
+- Excel workbook sheet names verified: Executive Summary, Gap Assessment, Statistics, Process Log.
+- Summary and assessment sheets were rendered and visually checked for wrapping, row height, status colours, and readable column widths.
 
 ## Pending external/UI evidence
 

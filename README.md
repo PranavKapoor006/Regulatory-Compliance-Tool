@@ -150,6 +150,7 @@ Obligation extraction:
 
 Policy gap review:
 
+- `Executive Summary`
 - `Gap Assessment`
 - `Statistics`
 - `Process Log`
@@ -162,7 +163,9 @@ Coverage status is always one of:
 - `Partially Covered`
 - `Completely Missing`
 
-Informational/non-actionable rows receive a one-line insight rather than `NA`. Completely covered actionable rows receive no unnecessary recommendation. Completely missing rows have blank policy evidence/page fields, preventing fabricated supporting text. The three status KPI counts always sum to Total Obligations.
+Informational/non-actionable rows receive a one-line insight rather than `NA`. Unfinished parent stems are assessed through their child clauses instead of becoming artificial gaps. Completely covered actionable rows receive no unnecessary recommendation. Completely missing rows have blank policy evidence/page fields, preventing fabricated supporting text. The three status KPI counts always sum to Total Obligations.
+
+When `ENABLE_LLM_GAP_REVIEW=true` and `GEMINI_API_KEY` is configured, the reviewer sends small batches of obligations and their top page-aware policy evidence candidates to Gemini. The prompt requires South African FSCA/FSB jurisdiction analysis, exact evidence quotes, one of the three allowed statuses, and tailored policy wording rather than keyword lists. Returned JSON is validated; invalid or missing responses use the jurisdiction-aware deterministic fallback. Review and approve organizational data-handling requirements before enabling this feature because selected policy text is sent to the configured Gemini API.
 
 ## Automated tests
 
@@ -196,7 +199,7 @@ npm.cmd run build
 - OCR quality depends on scan quality and installed Tesseract language data. Directive 159 is supported and rotation-tested, but poor scans may still contain spelling errors.
 - First-time OCR is CPU-intensive. Cached repeats are fast; cache files are local and excluded from Git.
 - Deterministic obligation classification is review assistance, not legal advice. Enable the optional LLM only after approving data-handling requirements.
-- Gap matching is evidence-constrained lexical/fuzzy analysis. A compliance professional must approve final classifications and remediation.
+- Gap review uses evidence retrieval followed by validated Gemini analysis when enabled, with a jurisdiction-aware deterministic fallback. A compliance professional must approve final classifications and remediation.
 
 ## Verified test evidence
 

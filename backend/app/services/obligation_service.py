@@ -50,11 +50,35 @@ def _enabled(name: str) -> bool:
 
 
 def _clean(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    repairs = (
+        (r"\bAninsurer\b", "An insurer"),
+        (r"\bA-written\b", "A written"),
+        (r"\bregulatary\b", "regulatory"),
+        (r"\bcperations\b", "operations"),
+        (r"\bcontre!\s+function\b", "control function"),
+        (r"\breferrec\b", "referred"),
+        (r"\bOctcber\b", "October"),
+        (r"\bAsscciation\b", "Association"),
+        (r"\bgovemed\b", "governed"),
+    )
+    for pattern, replacement in repairs:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
+def _is_structural_stem(text: str) -> bool:
+    cleaned = _clean(text)
+    return bool(
+        re.search(r"(?:at\s+least|following|as\s+follows)\s*[-—:]?\.?$", cleaned, flags=re.I)
+        or re.search(r"\b(?:must|shall)\b.{0,100}[-—:]\.?$", cleaned, flags=re.I)
+    )
 
 
 def is_actionable(text: str, parent_context: str = "") -> bool:
     text = _clean(text)
+    if _is_structural_stem(text):
+        return False
     if re.search(r"\b(?:forms?|directive)\b.*\bavailable\s+on\s+the\s+website\b", text, flags=re.I) and not re.search(r"\b(?:insurer|entity|board|management)\b.{0,80}\b(?:must|shall)\b", text, flags=re.I):
         return False
     if re.search(r"\binternational standards?\b.*\brequire", text, flags=re.I) and not re.search(r"\binsurers?\b.{0,100}\b(?:must|shall|required)\b", text, flags=re.I):
@@ -133,6 +157,21 @@ def _fallback_row(section: str, wording: str, parent_context: str) -> Dict[str, 
         "Support Function": support,
         "Priority": priority(f"{parent_context} {wording}") if actionable else "Low",
         "Actionable": "Yes" if actionable else "No",
+    }
+
+
+def _structural_parent_row(section: str, wording: str) -> Dict[str, str]:
+    category = classify_category(wording)
+    department, support = classify_department_support(f"{category} {wording}")
+    return {
+        "Section": section,
+        "Language from Directive": wording,
+        "Obligation": "Parent clause only; the actionable requirements are captured in the numbered child clauses that follow.",
+        "Obligation Category": category,
+        "Primary Responsible Department": department,
+        "Support Function": support,
+        "Priority": "Low",
+        "Actionable": "No",
     }
 
 
@@ -219,6 +258,14 @@ def extract_obligations_from_pdf(pdf_path: Path) -> Dict[str, Any]:
         section = str(item["Section"])
         wording = _clean(item["Language from Directive"])
         parent = _parent_context(breakdown, index)
+        child_prefix = f"{section}."
+        has_children = bool(re.fullmatch(r"\d+(?:\.\d+)*", section)) and any(
+            str(later.get("Section", "")).startswith(child_prefix)
+            for later in breakdown[index + 1:index + 12]
+        )
+        if has_children and _is_structural_stem(wording):
+            obligation_rows.append(_structural_parent_row(section, wording))
+            continue
         generated = _llm_rows(pdf_path.name, section, wording, parent)
         if generated:
             obligation_rows.extend(generated)
