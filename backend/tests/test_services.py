@@ -15,6 +15,8 @@ from app.services.gap_service import (
     VALID_STATUSES,
     _apply_gemini_assessment,
     _fallback_assessment,
+    _gemini_assessments,
+    _validated_gemini_assessments,
     _is_structural_parent,
     _jurisdiction_mismatch,
     chunk_policy_text,
@@ -126,6 +128,82 @@ class CrawlerTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_live_directive_159_row_shapes_are_repaired_from_xlsx(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            register = Path(folder) / "legacy_output.xlsx"
+            base = {
+                "Obligation Category": "Governance",
+                "Primary Responsible Department": "Legal & Compliance",
+                "Support Function": "Regulatory Compliance",
+                "Priority": "Low",
+                "Actionable": "No",
+            }
+            live_rows = [
+                {**base, "Section": "6.1", "Language from Directive": "The beard of directors and managing executives of an insurer remain responsible fer the insurance ousiness of the insurer, regardless of any outsourcing. Principies with which any outsourcing must comply 6.2) An insurer may not outsource any function or activity if that outsourcing may —", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "6.2.1", "Language from Directive": "materially increase risk to the insurer;", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "6.2.2", "Language from Directive": "materially impair the quality of the governance framework of the insurer, including the insurer's ability to manage its risks and meet its legal and regulatory obligatians;", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "6.2.3", "Language from Directive": "impair the ability of the Registrar te monitor the insurers compliance with its regulatory obligations; and", "Obligation": "The regulated entity must comply with this requirement: impair the ability of the Registrar te monitor the insurers compliance with its regulatory obligations."},
+                {**base, "Section": "6.2.4", "Language from Directive": "compromise the fair treatment of or continuous and satisfactory service to policyholders.", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "7.7", "Language from Directive": "A written contract must, at least, -", "Obligation": "Parent clause only; the actionable requirements are captured in the numbered child clauses that follow."},
+                {**base, "Section": "7.7.12", "Language from Directive": "address sub-outsourcing;", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "7.11", "Language from Directive": "An insurer must regularly assess the other person's -", "Obligation": "Parent clause only; the actionable requirements are captured in the numbered child clauses that follow."},
+                {**base, "Section": "7.11.2", "Language from Directive": "ability to comply with applicable laws; and", "Obligation": "The regulated entity must comply with this requirement: ability to comply with applicable laws."},
+            ]
+            with pd.ExcelWriter(register, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Summary": ["legacy export"]}).to_excel(writer, sheet_name="Executive Summary", index=False)
+                pd.DataFrame(live_rows).to_excel(writer, sheet_name="Gap Assessment", index=False)
+            repaired = load_register(register)
+            by_section = repaired.set_index("Section")
+            self.assertIn("must remain responsible", by_section.loc["6.1", "Obligation"])
+            self.assertIn("must not outsource", by_section.loc["6.2.1", "Obligation"])
+            self.assertIn("must not outsource", by_section.loc["6.2.2", "Obligation"])
+            self.assertIn("must not outsource", by_section.loc["6.2.3", "Obligation"])
+            self.assertIn("must not outsource", by_section.loc["6.2.4", "Obligation"])
+            self.assertEqual(by_section.loc["7.7.12", "Obligation"], "A written contract must, at least, address sub-outsourcing.")
+            self.assertIn("must regularly assess", by_section.loc["7.11.2", "Obligation"])
+
+    def test_missing_gemini_batch_rows_are_retried_individually(self) -> None:
+        tasks = [
+            {"id": f"row-{index}", "section": str(index), "directive_text": "The insurer must comply.", "obligation": "The insurer must comply.", "category": "Governance", "candidates": []}
+            for index in range(3)
+        ]
+        first = {"assessments": [{"id": "row-0", "coverage_status": "Completely Missing", "candidate_id": "", "evidence_quote": "", "rationale": "Missing", "recommendation": "Add the control."}]}
+        retries = [
+            {"assessments": [{"coverage_status": "Completely Missing", "candidate_id": "", "evidence_quote": "", "rationale": "Missing", "recommendation": "Add the control."}]},
+            {"assessments": [{"id": "wrong-id", "coverage_status": "Completely Missing", "candidate_id": "", "evidence_quote": "", "rationale": "Missing", "recommendation": "Add the control."}]},
+        ]
+        with patch.dict(os.environ, {"ENABLE_LLM_GAP_REVIEW": "true", "GAP_REVIEW_BATCH_SIZE": "3"}), patch(
+            "app.services.gap_service.chat_json", side_effect=[first, *retries]
+        ):
+            results = _gemini_assessments(tasks)
+        self.assertEqual(set(results), {"row-0", "row-1", "row-2"})
+
+    def test_invalid_gemini_row_receives_focused_retry(self) -> None:
+        task = {
+            "id": "row-1",
+            "section": "8.1.1",
+            "directive_text": "The insurer must notify the Registrar of the proposed outsourcing.",
+            "obligation": "The insurer must notify the Registrar of the proposed outsourcing.",
+            "category": "Regulatory reporting and returns",
+            "candidates": [{
+                "candidate_id": "candidate-1", "page": "3",
+                "text": "The business owner records proposed outsourcing for internal review.",
+                "score": 0.5, "keyword_score": 0.4, "hits": ["outsourcing"],
+            }],
+        }
+        invalid = {"assessments": [{"id": "row-1", "coverage_status": "maybe", "rationale": "Unclear"}]}
+        valid = {"assessments": [{
+            "id": "row-1", "coverage_status": "Partially Covered", "candidate_id": "candidate-1",
+            "evidence_quote": "records proposed outsourcing for internal review",
+            "rationale": "Internal review does not establish Registrar notification.",
+            "recommendation": "Add a requirement to notify the South African Registrar before outsourcing.",
+        }]}
+        with patch.dict(os.environ, {"ENABLE_LLM_GAP_REVIEW": "true", "GAP_REVIEW_BATCH_SIZE": "1"}), patch(
+            "app.services.gap_service.chat_json", side_effect=[invalid, valid]
+        ):
+            results = _validated_gemini_assessments([task])
+        self.assertEqual(results["row-1"]["status"], "Partially Covered")
+
     def test_old_register_is_repaired_before_gap_review(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             register = Path(folder) / "old_register.csv"
@@ -404,6 +482,23 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertIn("requiring the insurer to notify the Registrar", recommendation)
         self.assertNotIn("to An insurer must", recommendation)
+
+    def test_fallback_recommendation_handles_applicability_and_actor_conditions(self) -> None:
+        applicability = recommendation_for(
+            "Completely Missing",
+            "The regulated entity must comply with this applicability and scope provision: This Directive applies to all insurers.",
+            section="3.1",
+            directive_text="This Directive applies to all insurers.",
+        )
+        conditional_actor = recommendation_for(
+            "Completely Missing",
+            "An insurer, in respect of every outsourcing to another person, must determine whether the function is material.",
+            section="5.2.1",
+            directive_text="An insurer must determine whether outsourcing is material.",
+        )
+        for recommendation in (applicability, conditional_actor):
+            self.assertNotRegex(recommendation, r"\bmust\s+(?:An insurer|This Directive)\b")
+            self.assertIn("South African FSCA compliance clause", recommendation)
 
     def test_historical_deadline_recommendation_requires_legacy_review(self) -> None:
         recommendation = recommendation_for(
