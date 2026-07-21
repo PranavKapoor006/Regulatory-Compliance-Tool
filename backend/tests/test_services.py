@@ -10,7 +10,7 @@ import fitz
 import pandas as pd
 
 from app.services.breakdown_service import breakdown_regulatory_text
-from app.services.crawler_service import CrawlerService
+from app.services.crawler_service import CrawlerService, _extract_launch_year
 from app.services.gap_service import (
     VALID_STATUSES,
     _apply_gemini_assessment,
@@ -21,7 +21,7 @@ from app.services.gap_service import (
     recommendation_for,
     review_policy_gaps,
 )
-from app.services.obligation_service import extract_obligations_from_pdf
+from app.services.obligation_service import extract_obligations_from_pdf, generate_obligation
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:
@@ -48,6 +48,16 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual([row["Section"] for row in rows], ["Introduction", "1", "2", "2.1", "2.2.1"])
         self.assertEqual(rows[1]["Page"], "1")
         self.assertIn("1.25 million", rows[0]["Language from Directive"])
+
+    def test_embedded_consecutive_child_clauses_are_split(self) -> None:
+        raw = (
+            "7.7.9 provide for periodic performance reviews; "
+            "7.7.10 specify continued access to information; "
+            "7.7.11 address confidentiality and privacy."
+        )
+        rows = breakdown_regulatory_text(raw)
+        self.assertEqual([row["Section"] for row in rows], ["7.7.9", "7.7.10", "7.7.11"])
+        self.assertNotIn("7.7.10", rows[0]["Language from Directive"])
 
 
 class CrawlerTests(unittest.TestCase):
@@ -80,6 +90,27 @@ class CrawlerTests(unittest.TestCase):
         match = self.service._reference_match(exact)
         self.assertIsNotNone(match)
         self.assertIn("159", match.name)
+
+    def test_year_precedence_ignores_sharepoint_migration_dates(self) -> None:
+        values = {
+            "Year0": "2012",
+            "Created": "2025-04-01T00:00:00Z",
+            "Modified": "2026-01-01T00:00:00Z",
+        }
+        self.assertEqual(_extract_launch_year(values, "Directive 159.A.i.pdf"), "2012")
+
+    def test_true_issue_date_has_priority_over_year_and_filename(self) -> None:
+        values = {"IssueDate": "15 March 2014", "Year0": "2013", "Created": "2025-01-01"}
+        self.assertEqual(_extract_launch_year(values, "Directive 100.A.i 2012.pdf"), "2014")
+
+    def test_filename_year_precedes_created_date_and_rejects_future_noise(self) -> None:
+        values = {"Created": "2025-01-01T00:00:00Z"}
+        self.assertEqual(_extract_launch_year(values, "Directive 12.A.i issued 2011.pdf"), "2011")
+        self.assertEqual(_extract_launch_year({}, "Directive strategy 2099.pdf"), "Unknown")
+
+    def test_year_filter_is_exact(self) -> None:
+        records = [{"year": "2012"}, {"year": "2021"}, {"year": "Unknown"}]
+        self.assertEqual(self.service._filter_records(records, None, "2012"), [{"year": "2012"}])
 
 
 class WorkflowTests(unittest.TestCase):
@@ -175,6 +206,39 @@ class WorkflowTests(unittest.TestCase):
         ])
         self.assertTrue(_is_structural_parent(register, 0))
 
+    def test_applicability_parent_stem_is_assessed_through_children(self) -> None:
+        register = pd.DataFrame([
+            {"Section": "3.4", "Language from Directive": "This Directive also applies to ~"},
+            {"Section": "3.4.1", "Language from Directive": "the outsourcing of insurance business conducted by an overseas branch;"},
+        ])
+        self.assertTrue(_is_structural_parent(register, 0))
+
+    def test_child_obligation_inherits_parent_notification_action(self) -> None:
+        obligation = generate_obligation(
+            "8.1.1",
+            "the proposed outsourcing (subject to requirements under the Acts);",
+            "An insurer must notify the Registrar of —",
+        )
+        self.assertIn("must notify the Registrar", obligation)
+        self.assertIn("proposed outsourcing", obligation)
+
+    def test_child_inheritance_discards_ocr_footnote_after_parent_dash(self) -> None:
+        obligation = generate_obligation(
+            "8.1.2",
+            "the details of the other person to whom the insurer will outsource that function;",
+            "An insurer must notify the Registrar of — Bireaive (98 CT 4 61) garbled footnote text",
+        )
+        self.assertIn("must notify the Registrar", obligation)
+        self.assertNotIn("Bireaive", obligation)
+
+    def test_legal_act_number_is_not_truncated(self) -> None:
+        obligation = generate_obligation(
+            "3.3",
+            "This Directive applies to a related party as defined in section 1 of the Companies Act No. 71 of 2008, including a person outside South Africa.",
+        )
+        self.assertIn("Companies Act No. 71 of 2008", obligation)
+        self.assertIn("outside South Africa", obligation)
+
     def test_gemini_assessment_is_grounded_and_jurisdiction_validated(self) -> None:
         evidence = "The policy requires notification to the Saudi Arabia Insurance Authority before outsourcing."
         task = {
@@ -199,6 +263,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["status"], "Partially Covered")
         self.assertEqual(result["page"], "4")
         self.assertIn("Saudi Arabia Insurance Authority", result["evidence"])
+
+    def test_internal_information_does_not_cover_regulator_notification_child(self) -> None:
+        evidence = "The business owner prepares details of the proposed outsourcing for internal board approval."
+        task = {
+            "id": "row-1",
+            "section": "8.1.1",
+            "directive_text": "An insurer must notify the Registrar of the proposed outsourcing.",
+            "obligation": "An insurer must notify the Registrar of the proposed outsourcing.",
+            "candidates": [{
+                "candidate_id": "candidate-1", "page": "3", "text": evidence,
+                "score": 0.8, "keyword_score": 0.6, "hits": ["proposed", "outsourcing"],
+            }],
+        }
+        assessment = {
+            "coverage_status": "Completely Covered",
+            "candidate_id": "candidate-1",
+            "evidence_quote": evidence,
+            "rationale": "The policy captures the proposed outsourcing.",
+            "recommendation": "",
+        }
+        result = _apply_gemini_assessment(task, assessment)
+        self.assertEqual(result["status"], "Partially Covered")
+
+    def test_historical_deadline_recommendation_requires_legacy_review(self) -> None:
+        recommendation = recommendation_for(
+            "Completely Missing",
+            "Legacy outsourcing contracts had to comply by 1 January 2013.",
+            section="9.2",
+            directive_text="Contracts must comply when extended, renewed or amended, but no later than 1 January 2013.",
+        )
+        self.assertIn("legacy-contract review", recommendation)
+        self.assertIn("historical exception", recommendation)
+        self.assertNotIn("by no later than 1 January 2013", recommendation)
 
     def test_review_workflow_uses_validated_gemini_recommendation(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
