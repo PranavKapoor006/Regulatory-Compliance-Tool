@@ -75,6 +75,8 @@ def _clean(value: Any) -> str:
         (r"\bpersen te\b", "person to"),
         (r"\bRegistrar te\b", "Registrar to"),
         (r"\binsurers compliance\b", "insurer's compliance"),
+        (r"\bLTast\b", "LT Act"),
+        (r"\b42\s+April\s+2042\b", "12 April 2012"),
     )
     for pattern, replacement in repairs:
         text = re.sub(pattern, replacement, text, flags=re.I)
