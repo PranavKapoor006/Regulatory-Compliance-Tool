@@ -19,6 +19,7 @@ from app.services.gap_service import (
     _jurisdiction_mismatch,
     chunk_policy_text,
     coverage_status,
+    load_register,
     recommendation_for,
     review_policy_gaps,
 )
@@ -125,6 +126,57 @@ class CrawlerTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_old_register_is_repaired_before_gap_review(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            register = Path(folder) / "old_register.csv"
+            base = {
+                "Obligation Category": "Governance",
+                "Primary Responsible Department": "Legal & Compliance",
+                "Support Function": "Regulatory Compliance",
+                "Priority": "Low",
+                "Actionable": "No",
+            }
+            pd.DataFrame([
+                {**base, "Section": "6.1", "Language from Directive": "The board of directors and managing executives of an insurer remain responsible for the insurance business, regardless of outsourcing. Principles with which any outsourcing must comply 6.2) An insurer may not outsource any function if that outsourcing may —", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "6.2.1", "Language from Directive": "materially increase risk to the insurer;", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "6.2.3", "Language from Directive": "impair the ability of the Registrar to monitor compliance;", "Obligation": "Informational or contextual text; no standalone implementation obligation is created."},
+                {**base, "Section": "7.7", "Language from Directive": "A written contract must, at least, —", "Obligation": "Parent clause only; the actionable requirements are captured in the numbered child clauses that follow."},
+                {**base, "Section": "7.7.8", "Language from Directive": "provide that an insurer must monitor the other person's performance under the contract;", "Obligation": "provide that an insurer must monitor the other person's performance under the contract.", "Actionable": "Yes"},
+            ]).to_csv(register, index=False)
+            repaired = load_register(register)
+            self.assertEqual(repaired["Section"].astype(str).tolist(), ["6.1", "6.2", "6.2.1", "6.2.3", "7.7", "7.7.8"])
+            self.assertIn("remain responsible", repaired.iloc[0]["Obligation"])
+            self.assertEqual(repaired.iloc[1]["Actionable"], "No")
+            self.assertIn("must not outsource", repaired.iloc[2]["Obligation"])
+            self.assertIn("must not outsource", repaired.iloc[3]["Obligation"])
+            self.assertTrue(repaired.iloc[5]["Obligation"].startswith("A written contract must"))
+
+    def test_gemini_status_and_candidate_format_variants_are_accepted(self) -> None:
+        evidence = "The policy requires annual assessment of each service provider."
+        task = {
+            "id": "row-1", "section": "7.11.2",
+            "directive_text": "An insurer must regularly assess the service provider.",
+            "obligation": "An insurer must regularly assess the service provider.",
+            "candidates": [{"candidate_id": "candidate-1", "page": "8", "text": evidence, "score": 0.8, "keyword_score": 0.7, "hits": ["assess"]}],
+        }
+        result = _apply_gemini_assessment(task, {
+            "coverage_status": "fully covered", "candidate_id": "candidate_1",
+            "evidence_quote": "requires annual assessment of each service provider",
+            "rationale": "The annual assessment control is explicit.", "recommendation": "",
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "Completely Covered")
+
+    def test_prohibition_recommendation_never_reverses_must_not(self) -> None:
+        obligation = generate_obligation(
+            "6.2.3",
+            "impair the ability of the Registrar to monitor compliance;",
+            "An insurer may not outsource any function if that outsourcing may —",
+        )
+        self.assertIn("must not outsource", obligation)
+        recommendation = recommendation_for("Completely Missing", obligation, section="6.2.3", directive_text=obligation)
+        self.assertIn("must not outsource", recommendation)
+
     def test_native_pdf_extraction_and_output_workbook(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             pdf = Path(folder) / "Directive 240.A.i.pdf"
