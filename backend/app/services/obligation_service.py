@@ -61,6 +61,10 @@ def _clean(value: Any) -> str:
         (r"\bOctcber\b", "October"),
         (r"\bAsscciation\b", "Association"),
         (r"\bgovemed\b", "governed"),
+        (r"\bgovemance\b", "governance"),
+        (r"\bprior te\b", "prior to"),
+        (r"\brelating ta\b", "relating to"),
+        (r"\bpersen te\b", "person to"),
     )
     for pattern, replacement in repairs:
         text = re.sub(pattern, replacement, text, flags=re.I)
@@ -72,6 +76,8 @@ def _is_structural_stem(text: str) -> bool:
     return bool(
         re.search(r"(?:at\s+least|following|as\s+follows)\s*[-—:]?\.?$", cleaned, flags=re.I)
         or re.search(r"\b(?:must|shall)\b.{0,100}[-—:]\.?$", cleaned, flags=re.I)
+        or re.search(r"\b(?:applies|apply)\s+to\s*[~\-—:]?\.?$", cleaned, flags=re.I)
+        or re.search(r"\b(?:must|shall)\b.{0,300}\b(?:of|following|least)\s*[-—~]", cleaned, flags=re.I)
     )
 
 
@@ -108,13 +114,23 @@ def generate_obligation(section: str, wording: str, parent_context: str = "") ->
 
     # Preserve the regulatory condition and actor where possible while normalising
     # shall/required language into a reviewable must statement.
+    # Child list items inherit the parent's actor and action. Without this,
+    # "the proposed outsourcing" could be assessed as an internal-information
+    # requirement even though its parent says "notify the Registrar of—".
+    inherited = ""
+    if parent_context and ACTION_PATTERN.search(parent_context) and not ACTION_PATTERN.search(text):
+        inherited = re.sub(r"\s*[-—~][\s\S]*$", "", _clean(parent_context)).rstrip(" :")
+    source_text = f"{inherited} {text}".strip() if inherited else text
     actionable_parts = [
         part.strip()
-        for part in re.split(r"(?<=[.;])\s+", text)
+        # A period is a boundary only when the next sentence starts with a
+        # capital letter. This preserves legal citations such as "Act No. 71
+        # of 2008" instead of truncating the obligation after "No.".
+        for part in re.split(r"(?<=[;!?])\s+|(?<=\.)\s+(?=[A-Z])", source_text)
         if ACTION_PATTERN.search(part)
         and not re.search(r"\bavailable\s+on\s+the\s+website\b", part, flags=re.I)
     ]
-    statement = " ".join(actionable_parts) or text
+    statement = " ".join(actionable_parts) or source_text
     actor = re.search(r"\b(?:An insurer|The insurer|Insurers|The regulated entity|The board|A minimum|At least|Each|Any|The Registrars?|There must)\b", statement)
     if actor and 0 < actor.start() < 140:
         statement = statement[actor.start():]
