@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any, Dict
 
 import requests
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _extract_json(text: str) -> Dict[str, Any] | None:
@@ -32,7 +36,7 @@ def _gemini(system_prompt: str, user_prompt: str) -> Dict[str, Any] | None:
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     if not api_key:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
         "generationConfig": {
@@ -42,12 +46,18 @@ def _gemini(system_prompt: str, user_prompt: str) -> Dict[str, Any] | None:
         },
     }
     try:
-        response = requests.post(url, json=payload, timeout=90)
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            timeout=90,
+        )
         response.raise_for_status()
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0].get("text", "")
         return _extract_json(text)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("Gemini request failed: %s", exc)
         return None
 
 
