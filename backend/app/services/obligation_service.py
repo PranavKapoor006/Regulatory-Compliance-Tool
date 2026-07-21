@@ -73,6 +73,8 @@ def _clean(value: Any) -> str:
         (r"\bprior te\b", "prior to"),
         (r"\brelating ta\b", "relating to"),
         (r"\bpersen te\b", "person to"),
+        (r"\bRegistrar te\b", "Registrar to"),
+        (r"\binsurers compliance\b", "insurer's compliance"),
     )
     for pattern, replacement in repairs:
         text = re.sub(pattern, replacement, text, flags=re.I)
@@ -83,9 +85,9 @@ def _is_structural_stem(text: str) -> bool:
     cleaned = _clean(text)
     return bool(
         re.search(r"(?:at\s+least|following|as\s+follows)\s*[-—:]?\.?$", cleaned, flags=re.I)
-        or re.search(r"\b(?:must|shall)\b.{0,100}[-—:]\.?$", cleaned, flags=re.I)
+        or re.search(r"\b(?:must|shall|may\s+not)\b.{0,100}[-—:]\.?$", cleaned, flags=re.I)
         or re.search(r"\b(?:applies|apply)\s+to\s*[~\-—:]?\.?$", cleaned, flags=re.I)
-        or re.search(r"\b(?:must|shall)\b.{0,300}\b(?:of|following|least)\s*[-—~]", cleaned, flags=re.I)
+        or re.search(r"\b(?:must|shall|may\s+not)\b.{0,300}\b(?:of|following|least|may)\s*[-—~]", cleaned, flags=re.I)
     )
 
 
@@ -143,7 +145,9 @@ def generate_obligation(section: str, wording: str, parent_context: str = "") ->
     if actor and 0 < actor.start() < 140:
         statement = statement[actor.start():]
     statement = re.sub(r"\bshall\b", "must", statement, flags=re.I)
+    statement = re.sub(r"\bmay\s+not\b", "must not", statement, flags=re.I)
     statement = re.sub(r"\bis required to\b", "must", statement, flags=re.I)
+    statement = re.sub(r"\bremain(?:s)?\s+responsible\b", "must remain responsible", statement, flags=re.I)
     statement = statement.rstrip(" ;")
     direct_match = re.search(r"\bdirect\s+long-term and short-term insurers.*?\bto comply\b(?P<rest>.*)", statement, flags=re.I)
     if direct_match:
