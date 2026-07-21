@@ -299,6 +299,11 @@ class WorkflowTests(unittest.TestCase):
             ])
             result = review_policy_gaps(register, policy)
             rows = result["tabs"]["gap_assessment"]
+            self.assertEqual(result["pipeline"]["pipeline_version"], "2026-07-21.3")
+            self.assertTrue(result["pipeline"]["run_id"])
+            self.assertEqual(result["logs"][0]["stage"], "Pipeline")
+            self.assertTrue(any(log["stage"] == "Quality Control" for log in result["logs"]))
+            self.assertIn(result["pipeline"]["run_id"], result["output_files"]["excel"])
             self.assertTrue({row["Coverage Status"] for row in rows}.issubset(VALID_STATUSES))
             self.assertEqual(sum(item["value"] for item in result["kpis"][1:]), result["kpis"][0]["value"])
             for row in rows:
@@ -554,7 +559,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(row["Coverage Status"], "Partially Covered")
             self.assertIn("expressly excludes intermediary services", row["Policy Gap and Recommendations"])
             self.assertIn("Saudi Arabia", row["Corresponding Policy Text"])
-            self.assertIn("Gemini produced 1 validated assessment", result["logs"][2]["message"])
+            gap_log = next(log for log in result["logs"] if log["stage"] == "Gap Analysis")
+            self.assertIn("Gemini produced 1 validated assessment", gap_log["message"])
 
 
 if __name__ == "__main__":
