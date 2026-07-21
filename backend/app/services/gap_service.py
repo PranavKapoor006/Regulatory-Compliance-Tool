@@ -69,6 +69,13 @@ OCR_REPAIRS = (
     (re.compile(r"\bAsscciation\b", re.I), "Association"),
     (re.compile(r"\bgovemed\b", re.I), "governed"),
     (re.compile(r"\bgovemance\b", re.I), "governance"),
+    (re.compile(r"\bbeard of directors\b", re.I), "board of directors"),
+    (re.compile(r"\bfer the insurance ousiness\b", re.I), "for the insurance business"),
+    (re.compile(r"\bPrincipies\b", re.I), "Principles"),
+    (re.compile(r"\bobligatians\b", re.I), "obligations"),
+    (re.compile(r"\bRemuneration paic\b", re.I), "Remuneration paid"),
+    (re.compile(r"\bmust net result\b", re.I), "must not result"),
+    (re.compile(r"\bcommission cr a binder fee\b", re.I), "commission or a binder fee"),
     (re.compile(r"\bprior te\b", re.I), "prior to"),
     (re.compile(r"\brelating ta\b", re.I), "relating to"),
     (re.compile(r"\bpersen te\b", re.I), "person to"),
@@ -149,8 +156,16 @@ def _contains_negative(text: str) -> bool:
     return any(phrase in lowered for phrase in NEGATIVE_PHRASES)
 
 
-def _is_informational(row: pd.Series) -> bool:
-    if str(row.get("Actionable", "")).strip().lower() in {"no", "false", "0"}:
+def _is_informational(row: pd.Series, parent_context: str = "") -> bool:
+    directive_text = _clean(row.get("Language from Directive", ""))
+    inherited_duty = bool(
+        parent_context
+        and re.search(r"\b(must|shall|may\s+not|required|require[sd]?|notify|assess|provide)\b", parent_context, flags=re.I)
+        and len(directive_text.split()) >= 2
+    )
+    if inherited_duty:
+        return False
+    if str(row.get("Actionable", "")).strip().lower() in {"no", "false", "0"} and not inherited_duty:
         return True
     combined = f"{row.get('Obligation', '')} {row.get('Language from Directive', '')}".lower()
     return any(phrase in combined for phrase in (
@@ -238,7 +253,7 @@ def coverage_status(score: float, keyword_score: float, chunk_text: str, jurisdi
     return "Completely Missing"
 
 
-def _material_gaps(directive_text: str, obligation: str, evidence: str) -> List[str]:
+def _material_gaps(directive_text: str, obligation: str, evidence: str, section: str = "") -> List[str]:
     required = f"{directive_text} {obligation}".lower()
     present = evidence.lower()
     gaps: List[str] = []
@@ -250,23 +265,34 @@ def _material_gaps(directive_text: str, obligation: str, evidence: str) -> List[
         (r"\breinsur(?:er|ance)\b", r"\breinsur(?:er|ance)\b", "application to relevant reinsurance arrangements"),
         (r"\bnotify\b|\bnotification\b|\breport\b|\bsubmit\b", r"\bnotify\b|\bnotification\b|\breport\b|\bsubmit\b", "the required regulatory notification or reporting duty"),
         (r"\bboard\b.{0,50}\bapprov|\bapprov(?:al|e|ed)\b", r"\bboard\b.{0,50}\bapprov|\bapprov(?:al|e|ed)\b", "the required approval"),
-        (r"\bmonitor\b|\breview\b", r"\bmonitor\b|\breview\b", "ongoing monitoring and review"),
+        (r"\bmonitor\b|\breview\b|\bassess(?:ment|ed|es|ing)?\b", r"\bmonitor\b|\breview\b|\bassess(?:ment|ed|es|ing)?\b", "ongoing monitoring and review"),
         (r"\brecord\b|\bretain\b|\bdocument", r"\brecord\b|\bretain\b|\bdocument", "documented evidence and record retention"),
-        (r"\bno later than\b|\bwithin\s+\d+|\bprior to\b|\bimmediately\b|\bmonthly\b|\bquarterly\b|\bannually\b", r"\bno later than\b|\bwithin\s+\d+|\bprior to\b|\bimmediately\b|\bmonthly\b|\bquarterly\b|\bannually\b", "the specified timing or frequency"),
+        (r"\bno later than\b|\bwithin\s+\d+|\bprior to\b|\bimmediately\b|\bmonthly\b|\bquarterly\b|\bannually\b|\byearly\b|\bperiodic(?:ally)?\b|\bregular(?:ly)?\b", r"\bno later than\b|\bwithin\s+\d+|\bprior to\b|\bimmediately\b|\bmonthly\b|\bquarterly\b|\bannually\b|\byearly\b|\bperiodic(?:ally)?\b|\bregular(?:ly)?\b", "the specified timing or frequency"),
         (r"\bmay not\b|\bmust not\b|\bdoes not apply\b|\bprohibit", r"\bmay not\b|\bmust not\b|\bdoes not apply\b|\bprohibit", "the stated prohibition or exception"),
     ]
     for required_pattern, evidence_pattern, label in rules:
         if re.search(required_pattern, required, flags=re.I) and not re.search(evidence_pattern, present, flags=re.I):
             gaps.append(label)
+    if section.startswith("7.7.") and not re.search(r"\b(?:written\s+)?(?:outsourcing\s+)?(?:contract|agreement)\b", present, flags=re.I):
+        gaps.append("an express requirement in the written outsourcing contract")
+    if section.startswith("7.11.") and not re.search(r"\b(?:assess|assessment|review|monitor)(?:ed|ing|s)?\b", present, flags=re.I):
+        gaps.append("a documented assessment of the service provider")
     if _jurisdiction_mismatch(directive_text, obligation, evidence):
         gaps.insert(0, "express application to South African operations and the FSCA/FSB framework")
     return list(dict.fromkeys(gaps))
 
 
+def _obligation_action_phrase(obligation: str) -> str:
+    phrase = _clean(obligation).rstrip(" .-—")
+    phrase = re.sub(r"^The regulated entity must comply with (?:this requirement|this applicability and scope provision):\s*", "", phrase, flags=re.I)
+    phrase = re.sub(r"^(?:An insurer|The insurer|Insurers|The regulated entity) must\s+", "", phrase, flags=re.I)
+    phrase = re.sub(r"^A written contract must(?:,\s*at least,?)?\s+", "", phrase, flags=re.I)
+    return phrase[:440].strip()
+
+
 def _draft_policy_requirement(section: str, directive_text: str, obligation: str) -> str:
     combined = f"{directive_text} {obligation}".lower()
-    clean_obligation = _clean(obligation).rstrip(" .-—")
-    clean_obligation = re.sub(r"^The regulated entity must comply with (?:this requirement|this applicability and scope provision):\s*", "", clean_obligation, flags=re.I)
+    clean_obligation = _obligation_action_phrase(obligation)
     if section == "9.2" or "1 january 2013" in combined:
         return (
             "Perform and document a legacy-contract review for South African outsourcing arrangements entered into before Directive 159 took effect. "
@@ -299,7 +325,7 @@ def recommendation_for(
     requirement = _draft_policy_requirement(section or "the relevant", directive_text, obligation)
     if status == "Completely Missing":
         return requirement
-    gaps = _material_gaps(directive_text, obligation, evidence)
+    gaps = _material_gaps(directive_text, obligation, evidence, section)
     if negative_evidence:
         gaps.insert(0, "removal of policy wording that makes the requirement optional or unavailable")
     gap_text = "; ".join(gaps[:4])
@@ -381,7 +407,7 @@ def _apply_gemini_assessment(task: Dict[str, Any], assessment: Dict[str, Any]) -
         page = str(candidate["page"])
         if _jurisdiction_mismatch(task["directive_text"], task["obligation"], candidate["text"]) and status == "Completely Covered":
             status = "Partially Covered"
-        if status == "Completely Covered" and _material_gaps(task["directive_text"], task["obligation"], candidate["text"]):
+        if status == "Completely Covered" and _material_gaps(task["directive_text"], task["obligation"], candidate["text"], task["section"]):
             status = "Partially Covered"
 
     recommendation = _clean(assessment.get("recommendation"))
@@ -417,7 +443,9 @@ def _fallback_assessment(task: Dict[str, Any]) -> Dict[str, str]:
             evidence_text,
             _jurisdiction_mismatch(task["directive_text"], task["obligation"], evidence_text),
         )
-    gaps = _material_gaps(task["directive_text"], task["obligation"], evidence_text)
+    gaps = _material_gaps(task["directive_text"], task["obligation"], evidence_text, task["section"])
+    if status == "Completely Covered" and gaps:
+        status = "Partially Covered"
     if status == "Completely Covered":
         rationale = "The selected policy evidence directly covers the material elements of the obligation."
     elif status == "Partially Covered":
@@ -604,19 +632,22 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
         directive_text = _clean(row["Language from Directive"])
         obligation = _clean(row["Obligation"])
         base = {"index": index, "row": row, "section": section, "directive_text": directive_text, "obligation": obligation}
-        if _is_informational(row):
-            base["special"] = {
-                "status": "Completely Covered",
-                "rationale": "Informational or contextual directive text; no standalone policy requirement is assessed.",
-                "recommendation": "Informational item only; no policy amendment is required.",
-                "page": "",
-                "evidence": "",
-            }
-        elif _is_structural_parent(register, index):
+        parent_section = section.rsplit(".", 1)[0] if "." in section else ""
+        parent_matches = register.iloc[:index][register.iloc[:index]["Section"].astype(str) == parent_section] if parent_section else pd.DataFrame()
+        parent_context = _clean(parent_matches.iloc[-1]["Language from Directive"]) if not parent_matches.empty else ""
+        if _is_structural_parent(register, index):
             base["special"] = {
                 "status": "Completely Covered",
                 "rationale": "This is an unfinished parent stem; its substantive requirements are assessed in the child clauses that follow.",
                 "recommendation": "Parent clause only; review the separately assessed child requirements.",
+                "page": "",
+                "evidence": "",
+            }
+        elif _is_informational(row, parent_context):
+            base["special"] = {
+                "status": "Completely Covered",
+                "rationale": "Informational or contextual directive text; no standalone policy requirement is assessed.",
+                "recommendation": "Informational item only; no policy amendment is required.",
                 "page": "",
                 "evidence": "",
             }
