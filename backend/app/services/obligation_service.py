@@ -35,7 +35,8 @@ OBLIGATION_COLUMNS = [
 ACTION_PATTERN = re.compile(
     r"\b(must|shall|required|require[sd]?|ensure[sd]?|notify|submit|maintain|"
     r"establish|implement|document|review|approve|monitor|report|comply|provide|"
-    r"prohibit|may\s+not|assess|identify|develop|secure|retain|record|appl(?:y|ies))\b",
+    r"prohibit|may\s+not|assess|identify|develop|secure|retain|record|appl(?:y|ies)|"
+    r"remain(?:s|ed|ing)?\s+responsible)\b",
     flags=re.I,
 )
 NON_ACTIONABLE_PATTERN = re.compile(
@@ -62,6 +63,13 @@ def _clean(value: Any) -> str:
         (r"\bAsscciation\b", "Association"),
         (r"\bgovemed\b", "governed"),
         (r"\bgovemance\b", "governance"),
+        (r"\bbeard of directors\b", "board of directors"),
+        (r"\bfer the insurance ousiness\b", "for the insurance business"),
+        (r"\bPrincipies\b", "Principles"),
+        (r"\bobligatians\b", "obligations"),
+        (r"\bRemuneration paic\b", "Remuneration paid"),
+        (r"\bmust net result\b", "must not result"),
+        (r"\bcommission cr a binder fee\b", "commission or a binder fee"),
         (r"\bprior te\b", "prior to"),
         (r"\brelating ta\b", "relating to"),
         (r"\bpersen te\b", "person to"),
@@ -94,7 +102,7 @@ def is_actionable(text: str, parent_context: str = "") -> bool:
     # A list item inherits the action from a parent clause such as "A policy must
     # include—". This prevents child rows from being incorrectly marked contextual.
     if parent_context and ACTION_PATTERN.search(parent_context):
-        return len(text.split()) >= 3 and not NON_ACTIONABLE_PATTERN.search(text)
+        return len(text.split()) >= 2 and not NON_ACTIONABLE_PATTERN.search(text)
     return False
 
 
@@ -118,7 +126,7 @@ def generate_obligation(section: str, wording: str, parent_context: str = "") ->
     # "the proposed outsourcing" could be assessed as an internal-information
     # requirement even though its parent says "notify the Registrar of—".
     inherited = ""
-    if parent_context and ACTION_PATTERN.search(parent_context) and not ACTION_PATTERN.search(text):
+    if parent_context and _is_structural_stem(parent_context):
         inherited = re.sub(r"\s*[-—~][\s\S]*$", "", _clean(parent_context)).rstrip(" :")
     source_text = f"{inherited} {text}".strip() if inherited else text
     actionable_parts = [
@@ -204,7 +212,8 @@ def _llm_rows(directive_name: str, section: str, wording: str, parent_context: s
         if not isinstance(item, dict):
             continue
         obligation = _clean(item.get("obligation"))
-        actionable = "Yes" if str(item.get("actionable", "Yes")).strip().lower() in {"yes", "true", "1"} else "No"
+        deterministic_actionable = is_actionable(wording, parent_context)
+        actionable = "Yes" if deterministic_actionable or str(item.get("actionable", "Yes")).strip().lower() in {"yes", "true", "1"} else "No"
         category = _clean(item.get("obligation_category"))
         if category not in allowed_categories():
             category = classify_category(f"{wording} {obligation}")
@@ -214,6 +223,8 @@ def _llm_rows(directive_name: str, section: str, wording: str, parent_context: s
         )
         if not obligation:
             continue
+        if deterministic_actionable and re.search(r"informational|contextual|no standalone", obligation, flags=re.I):
+            obligation = generate_obligation(section, wording, parent_context)
         rows.append({
             "Section": section,
             "Language from Directive": wording,
