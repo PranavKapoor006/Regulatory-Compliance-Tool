@@ -68,6 +68,10 @@ OCR_REPAIRS = (
     (re.compile(r"\bOctcber\b", re.I), "October"),
     (re.compile(r"\bAsscciation\b", re.I), "Association"),
     (re.compile(r"\bgovemed\b", re.I), "governed"),
+    (re.compile(r"\bgovemance\b", re.I), "governance"),
+    (re.compile(r"\bprior te\b", re.I), "prior to"),
+    (re.compile(r"\brelating ta\b", re.I), "relating to"),
+    (re.compile(r"\bpersen te\b", re.I), "person to"),
 )
 
 
@@ -166,6 +170,8 @@ def _is_structural_parent(register: pd.DataFrame, index: int) -> bool:
     unfinished = bool(
         re.search(r"(?:at\s+least|following|as\s+follows)\s*[-—:]?\.?$", text, flags=re.I)
         or re.search(r"\b(?:must|shall)\b.{0,100}[-—:]\.?$", text, flags=re.I)
+        or re.search(r"\b(?:applies|apply)\s+to\s*[~\-—:]?\.?$", text, flags=re.I)
+        or re.search(r"\b(?:must|shall)\b.{0,300}\b(?:of|following|least)\s*[-—~]", text, flags=re.I)
     )
     if not unfinished:
         return False
@@ -261,6 +267,11 @@ def _draft_policy_requirement(section: str, directive_text: str, obligation: str
     combined = f"{directive_text} {obligation}".lower()
     clean_obligation = _clean(obligation).rstrip(" .-—")
     clean_obligation = re.sub(r"^The regulated entity must comply with (?:this requirement|this applicability and scope provision):\s*", "", clean_obligation, flags=re.I)
+    if section == "9.2" or "1 january 2013" in combined:
+        return (
+            "Perform and document a legacy-contract review for South African outsourcing arrangements entered into before Directive 159 took effect. "
+            "Confirm that each arrangement was brought into compliance when extended, renewed or amended, record any historical exception, and remediate any surviving non-compliant contract."
+        )
     if "intermediary services" in combined and "all aspects" in combined:
         return "For its South African insurance operations, the policy must apply Directive 159 to every outsourced aspect of the insurer's insurance business while expressly excluding intermediary services from this scope."
     if re.search(r"\bnotify\b|\bnotification\b|\breport\b|\bsubmit\b", combined):
@@ -369,6 +380,8 @@ def _apply_gemini_assessment(task: Dict[str, Any], assessment: Dict[str, Any]) -
         evidence = quote if _normalised_contains(candidate["text"], quote) else _evidence_excerpt(candidate["text"], task["obligation"])
         page = str(candidate["page"])
         if _jurisdiction_mismatch(task["directive_text"], task["obligation"], candidate["text"]) and status == "Completely Covered":
+            status = "Partially Covered"
+        if status == "Completely Covered" and _material_gaps(task["directive_text"], task["obligation"], candidate["text"]):
             status = "Partially Covered"
 
     recommendation = _clean(assessment.get("recommendation"))
@@ -516,25 +529,36 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         gap_sheet.freeze_panes(1, 2)
         gap_sheet.autofilter(0, 0, len(assessment), len(assessment.columns) - 1)
         gap_sheet.set_row(0, 34)
-        for row_index in range(1, len(assessment) + 1):
-            gap_sheet.set_row(row_index, 72)
         widths = {
             "Section": 11,
-            "Language from Directive": 44,
-            "Obligation": 44,
+            "Language from Directive": 52,
+            "Obligation": 58,
             "Obligation Category": 24,
             "Primary Responsible Department": 24,
             "Support Function": 24,
             "Coverage Status": 22,
             "Review Rationale": 44,
-            "Policy Gap and Recommendations": 54,
+            "Policy Gap and Recommendations": 64,
             "Policy Page": 11,
-            "Corresponding Policy Text": 54,
+            "Corresponding Policy Text": 64,
             "Priority": 11,
         }
         for index, column in enumerate(assessment.columns):
             gap_sheet.write(0, index, column, header_format)
             gap_sheet.set_column(index, index, widths.get(column, 20), wrap)
+        narrative_columns = [
+            "Language from Directive", "Obligation", "Review Rationale",
+            "Policy Gap and Recommendations", "Corresponding Policy Text",
+        ]
+        for row_index, (_, data_row) in enumerate(assessment.iterrows(), start=1):
+            estimated_lines = max(
+                1,
+                *(
+                    (len(str(data_row.get(column, ""))) // max(widths[column] - 4, 10)) + 1
+                    for column in narrative_columns
+                ),
+            )
+            gap_sheet.set_row(row_index, min(max(30, estimated_lines * 15), 180))
         status_column = assessment.columns.get_loc("Coverage Status")
         status_formats = {
             "Completely Covered": workbook.add_format({"bg_color": "#DCFCE7", "font_color": "#166534", "bold": True}),
