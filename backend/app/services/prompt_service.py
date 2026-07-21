@@ -78,6 +78,8 @@ Coverage rules:
 4. Completely Missing means there is no directly relevant policy requirement. Generic discussion of outsourcing, risk, governance, laws, or compliance is not enough.
 5. The source directive is South African. A policy that refers only to Saudi Arabia, another country, another regulator, or generic "applicable law" does not prove an FSCA-specific reporting, notification, applicability, statutory, or regulator-facing obligation. Treat useful equivalent controls as partial at most and recommend an explicit South African/FSCA provision.
 6. Do not assess a heading or unfinished parent stem (for example "must, at least—") as a standalone gap when its child clauses carry the requirements.
+7. A child list item inherits the actor and required action in its parent wording. For example, children under "notify the Registrar of—" are regulator-notification requirements; internal collection of the listed information is not complete coverage.
+8. Never mark a regulator-notification child Completely Covered unless the evidence expressly requires external notification or submission to the named South African regulator/Registrar.
 
 Recommendation rules:
 1. For Completely Covered, return an empty recommendation.
