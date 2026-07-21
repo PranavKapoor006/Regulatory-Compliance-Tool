@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 PAGE_MARKER_PATTERN = re.compile(r"--- Page\s+(\d+)\s*\|[^-]*---", flags=re.I)
 SECTION_PATTERN = re.compile(
-    r"^\s*(?P<section>\d+(?:\.\d+)*\.?)\s+(?P<body>\S[\s\S]*)$"
+    r"^\s*(?P<section>\d+(?:\.\d+)*(?:\.|\))?)\s+(?P<body>\S[\s\S]*)$"
 )
 ANNEXURE_PATTERN = re.compile(r"^\s*(ANNEXURE\s+[A-Z0-9]+)\s*(.*)$", flags=re.I)
 ROMAN_OR_ALPHA_PATTERN = re.compile(r"^\s*(\([a-z]\)|\([ivxlcdm]+\))\s+(.*)$", flags=re.I)
@@ -258,9 +258,9 @@ def breakdown_regulatory_text(raw_text: str) -> List[Dict[str, str]]:
 
         if section_match:
             raw_candidate = section_match.group("section")
-            candidate = raw_candidate.rstrip(".")
+            candidate = raw_candidate.rstrip(".)")
             body = section_match.group("body").strip()
-            digit_dot_marker = "." in raw_candidate
+            digit_dot_marker = "." in raw_candidate or raw_candidate.endswith(")")
             if (digit_dot_marker or _is_upper_heading(body)) and not _is_false_positive_section(candidate, body):
                 flush()
                 current_section = candidate
@@ -311,7 +311,7 @@ def breakdown_regulatory_text(raw_text: str) -> List[Dict[str, str]]:
             continue
         parent_prefix = ".".join(parts[:-1])
         current_number = int(parts[-1])
-        marker_re = re.compile(rf"(?<![\d.])({re.escape(parent_prefix)}\.(\d+))\s+")
+        marker_re = re.compile(rf"(?<![\d.])({re.escape(parent_prefix)}\.(\d+))[.)]?\s+")
         markers = [
             match for match in marker_re.finditer(wording)
             if int(match.group(2)) > current_number
