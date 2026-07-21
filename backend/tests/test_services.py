@@ -14,6 +14,7 @@ from app.services.crawler_service import CrawlerService, _extract_launch_year
 from app.services.gap_service import (
     VALID_STATUSES,
     _apply_gemini_assessment,
+    _fallback_assessment,
     _is_structural_parent,
     _jurisdiction_mismatch,
     chunk_policy_text,
@@ -21,7 +22,7 @@ from app.services.gap_service import (
     recommendation_for,
     review_policy_gaps,
 )
-from app.services.obligation_service import extract_obligations_from_pdf, generate_obligation
+from app.services.obligation_service import extract_obligations_from_pdf, generate_obligation, is_actionable
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:
@@ -58,6 +59,16 @@ class BreakdownTests(unittest.TestCase):
         rows = breakdown_regulatory_text(raw)
         self.assertEqual([row["Section"] for row in rows], ["7.7.9", "7.7.10", "7.7.11"])
         self.assertNotIn("7.7.10", rows[0]["Language from Directive"])
+
+    def test_parent_marker_with_closing_parenthesis_is_split_from_previous_clause(self) -> None:
+        raw = (
+            "6.1 The board remains responsible regardless of outsourcing. "
+            "6.2) An insurer may not outsource a function if that outsourcing may —\n"
+            "6.2.1 materially increase risk to the insurer;"
+        )
+        rows = breakdown_regulatory_text(raw)
+        self.assertEqual([row["Section"] for row in rows], ["6.1", "6.2", "6.2.1"])
+        self.assertNotIn("6.2)", rows[0]["Language from Directive"])
 
 
 class CrawlerTests(unittest.TestCase):
@@ -222,6 +233,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("must notify the Registrar", obligation)
         self.assertIn("proposed outsourcing", obligation)
 
+    def test_short_child_clause_inherits_written_contract_requirement(self) -> None:
+        parent = "A written contract must, at least, —"
+        self.assertTrue(is_actionable("address sub-outsourcing;", parent))
+        obligation = generate_obligation("7.7.12", "address sub-outsourcing;", parent)
+        self.assertEqual(obligation, "A written contract must, at least, address sub-outsourcing.")
+
+    def test_retained_board_responsibility_is_actionable(self) -> None:
+        wording = "The board of directors and managing executives of an insurer remain responsible for the insurance business regardless of outsourcing."
+        self.assertTrue(is_actionable(wording))
+        self.assertIn("remain responsible", generate_obligation("6.1", wording))
+
+    def test_child_with_incidental_action_word_inherits_primary_parent_action(self) -> None:
+        obligation = generate_obligation(
+            "7.11.2",
+            "ability to comply with applicable laws; and",
+            "An insurer must regularly assess the other person's —",
+        )
+        self.assertIn("must regularly assess", obligation)
+        self.assertIn("ability to comply with applicable laws", obligation)
+
     def test_child_inheritance_discards_ocr_footnote_after_parent_dash(self) -> None:
         obligation = generate_obligation(
             "8.1.2",
@@ -285,6 +316,42 @@ class WorkflowTests(unittest.TestCase):
         }
         result = _apply_gemini_assessment(task, assessment)
         self.assertEqual(result["status"], "Partially Covered")
+
+    def test_risk_description_does_not_cover_written_contract_requirement(self) -> None:
+        evidence = "Compliance risk arises when a third party fails to comply with applicable regulations."
+        task = {
+            "id": "row-1", "section": "7.7.5",
+            "directive_text": "A written contract must require that the other person comply with applicable laws.",
+            "obligation": "A written contract must require that the other person comply with applicable laws.",
+            "candidates": [{"candidate_id": "candidate-1", "page": "8", "text": evidence, "score": 0.8, "keyword_score": 0.7, "hits": ["comply", "laws"]}],
+        }
+        assessment = {"coverage_status": "Completely Covered", "candidate_id": "candidate-1", "evidence_quote": evidence, "rationale": "Relevant risk is described.", "recommendation": ""}
+        result = _apply_gemini_assessment(task, assessment)
+        self.assertEqual(result["status"], "Partially Covered")
+        fallback = _fallback_assessment(task)
+        self.assertEqual(fallback["status"], "Partially Covered")
+
+    def test_risk_description_does_not_cover_regular_assessment(self) -> None:
+        evidence = "Compliance risk may arise when a provider fails to comply with applicable laws."
+        task = {
+            "id": "row-1", "section": "7.11.2",
+            "directive_text": "An insurer must regularly assess the other person's ability to comply with applicable laws.",
+            "obligation": "An insurer must regularly assess the other person's ability to comply with applicable laws.",
+            "candidates": [{"candidate_id": "candidate-1", "page": "8", "text": evidence, "score": 0.8, "keyword_score": 0.7, "hits": ["comply", "laws"]}],
+        }
+        assessment = {"coverage_status": "Completely Covered", "candidate_id": "candidate-1", "evidence_quote": evidence, "rationale": "Compliance risk is described.", "recommendation": ""}
+        result = _apply_gemini_assessment(task, assessment)
+        self.assertEqual(result["status"], "Partially Covered")
+
+    def test_fallback_recommendation_does_not_duplicate_actor_and_must(self) -> None:
+        recommendation = recommendation_for(
+            "Completely Missing",
+            "An insurer must notify the Registrar before outsourcing.",
+            section="8.1",
+            directive_text="An insurer must notify the Registrar before outsourcing.",
+        )
+        self.assertIn("requiring the insurer to notify the Registrar", recommendation)
+        self.assertNotIn("to An insurer must", recommendation)
 
     def test_historical_deadline_recommendation_requires_legacy_review(self) -> None:
         recommendation = recommendation_for(
