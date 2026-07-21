@@ -13,13 +13,17 @@ type DirectiveRecord = {
   filename?: string;
   cached?: boolean;
   downloaded?: boolean;
+  downloadable?: boolean;
+  status?: string;
 };
 
 type Kpi = { label: string; value: string | number };
 type LogRow = { stage: string; status: string; message: string; row_count: number };
-type Results = { kpis: Kpi[]; tabs: Record<string, any>; logs: LogRow[]; output_files?: Record<string, string> };
+type PipelineInfo = { pipeline_version: string; run_id?: string; source_file?: string; source_sha256?: string };
+type Results = { kpis: Kpi[]; tabs: Record<string, any>; logs: LogRow[]; output_files?: Record<string, string>; pipeline?: PipelineInfo };
 
-const API_BASE = '';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const REQUIRED_GAP_PIPELINE = '2026-07-21.3';
 
 function friendlyApiError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -259,7 +263,7 @@ function CrawlerPage({ setPage }: { setPage: (page: Page) => void }) {
       const response = await fetch(`${API_BASE}/api/crawler/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ section, year }),
+        body: JSON.stringify({ section, year, refresh: true }),
       });
       if (!response.ok) throw new Error(await readApiError(response));
       const data = await response.json();
@@ -288,6 +292,10 @@ function CrawlerPage({ setPage }: { setPage: (page: Page) => void }) {
       });
       if (!response.ok) throw new Error(await readApiError(response));
       const data = await response.json();
+      if (!(data.downloaded || []).length) {
+        const reason = (data.logs || []).filter((row: LogRow) => row.status === 'Failed').map((row: LogRow) => row.message).join('; ');
+        throw new Error(reason || 'The selected directives could not be downloaded. Review Crawl Log for details.');
+      }
       const downloadedIds = new Set((data.downloaded || []).map((item: DirectiveRecord) => item.id));
       setLogs([...(logs || []), ...(data.logs || [])]);
       setDirectives((prev) => prev.map((item) => downloadedIds.has(item.id) ? { ...item, downloaded: true, cached: true } : item));
@@ -349,8 +357,8 @@ function CrawlerPage({ setPage }: { setPage: (page: Page) => void }) {
             {tab === 'Documents' && <div className="directive-list">
               {directives.map((directive) => (
                 <label className="directive-row" key={directive.id}>
-                  <input type="checkbox" checked={selected.includes(directive.id)} onChange={(e) => setSelected((prev) => e.target.checked ? [...prev, directive.id] : prev.filter((id) => id !== directive.id))} />
-                  <span><strong>{directive.title}</strong><small>{directive.section} | {directive.year} | {(directive as any).source_type || 'FSCA'} | {directive.cached ? 'Cached' : 'Not cached'}</small></span>
+                  <input type="checkbox" disabled={directive.downloadable === false} checked={selected.includes(directive.id)} onChange={(e) => setSelected((prev) => e.target.checked ? [...prev, directive.id] : prev.filter((id) => id !== directive.id))} />
+                  <span><strong>{directive.title}</strong><small>{directive.section} | {directive.year} | {(directive as any).source_type || 'FSCA'} | {directive.cached ? 'Cached' : (directive.status || 'Ready')}</small></span>
                   <a href={directive.source_link} target="_blank" rel="noreferrer">Source</a>
                 </label>
               ))}
@@ -457,6 +465,8 @@ function ObligationPage({ setPage }: { setPage: (page: Page) => void }) {
 }
 
 function GapPage({ setPage }: { setPage: (page: Page) => void }) {
+  const [availableRegisters, setAvailableRegisters] = useState<any[]>([]);
+  const [registerName, setRegisterName] = useState('');
   const [register, setRegister] = useState<File | null>(null);
   const [policy, setPolicy] = useState<File | null>(null);
   const [results, setResults] = useState<Results | null>(null);
@@ -466,19 +476,37 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
+  useEffect(() => {
+    fetch(`${API_BASE}/api/gap/available-registers`)
+      .then((response) => response.json())
+      .then((data) => setAvailableRegisters(data.registers || []))
+      .catch(() => undefined);
+  }, []);
+
   const runReview = async (event: FormEvent) => {
     event.preventDefault();
-    if (!register || !policy) return;
+    if ((!register && !registerName) || !policy) return;
     setLoading(true);
     setErrorMessage('');
     setActiveStep(1);
     try {
+      const healthResponse = await fetch(`${API_BASE}/api/health`, { cache: 'no-store' });
+      if (!healthResponse.ok) throw new Error(await readApiError(healthResponse));
+      const health = await healthResponse.json();
+      const activeVersion = health?.gap_pipeline?.pipeline_version;
+      if (activeVersion !== REQUIRED_GAP_PIPELINE) {
+        throw new Error(`The frontend reached gap pipeline ${activeVersion || 'unknown'}, but ${REQUIRED_GAP_PIPELINE} is required. Stop the stale backend or correct VITE_API_BASE_URL, then restart both servers.`);
+      }
       const form = new FormData();
-      form.append('register', register);
+      if (register) form.append('register', register);
+      if (registerName) form.append('register_name', registerName);
       form.append('policy', policy);
-      const response = await fetch(`${API_BASE}/api/gap/review`, { method: 'POST', body: form });
+      const response = await fetch(`${API_BASE}/api/gap/review`, { method: 'POST', body: form, cache: 'no-store' });
       if (!response.ok) throw new Error(await readApiError(response));
       const data = await response.json();
+      if (data?.pipeline?.pipeline_version !== REQUIRED_GAP_PIPELINE || !data?.pipeline?.run_id) {
+        throw new Error('The assessment response has missing or stale pipeline provenance, so no workbook will be offered for download.');
+      }
       setResults(data);
       setActiveStep(2);
     } catch (error) {
@@ -503,9 +531,10 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
       />
       <ProgressSteps steps={['Select Inputs', 'Gap Analysis', 'Results']} activeIndex={activeStep} />
       <form className="control-panel glass-panel" onSubmit={runReview}>
-        <label>Obligation register<input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => setRegister(e.target.files?.[0] || null)} /></label>
+        <label>Select generated register<select value={registerName} onChange={(e) => { setRegisterName(e.target.value); setRegister(null); }}><option value="">Upload a register instead</option>{availableRegisters.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>
+        <label>Upload obligation register<input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => { setRegister(e.target.files?.[0] || null); setRegisterName(''); }} /></label>
         <label>Internal policy PDF<input type="file" accept="application/pdf" onChange={(e) => setPolicy(e.target.files?.[0] || null)} /></label>
-        <button className="primary-button" type="submit" disabled={!register || !policy || loading}>{loading ? 'Reviewing...' : 'Start Gap Assessment'}</button>
+        <button className="primary-button" type="submit" disabled={(!register && !registerName) || !policy || loading}>{loading ? 'Reviewing...' : 'Start Gap Assessment'}</button>
       </form>
       {errorMessage && <div className="error-panel"><strong>Unable to complete gap review</strong><p>{errorMessage}</p></div>}
       {results ? (
@@ -514,6 +543,9 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
           summary="Review coverage status, supporting policy evidence, statistics, and processing notes in a compact workspace."
         >
           <KpiGrid kpis={results.kpis} />
+          <div className="status-banner success-banner">
+            Verified pipeline {results.pipeline?.pipeline_version} · Run {results.pipeline?.run_id} · Source {results.pipeline?.source_sha256?.slice(0, 16)}
+          </div>
           <div className="tabs">{['Gap Assessment', 'Statistics', 'Process Log'].map((name) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => setTab(name)}>{name}</button>)}</div>
           <TabScroll>
             {tab === 'Gap Assessment' && <><div className="filter-row inline-filters"><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>{statuses.map((x) => <option key={String(x)}>{String(x)}</option>)}</select></div><DataTable rows={filteredRows} /></>}
@@ -521,8 +553,8 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
             {tab === 'Process Log' && <DataTable rows={results.logs || []} />}
           </TabScroll>
           <div className="action-row compact-actions">
-            {results.output_files?.excel && <a className="primary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.excel}`}>Download Excel</a>}
-            {results.output_files?.csv && <a className="secondary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.csv}`}>Download CSV</a>}
+            {results.output_files?.excel && <a className="primary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.excel}?run=${encodeURIComponent(results.pipeline?.run_id || '')}`}>Download Excel</a>}
+            {results.output_files?.csv && <a className="secondary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.csv}?run=${encodeURIComponent(results.pipeline?.run_id || '')}`}>Download CSV</a>}
             <button className="ghost-button" onClick={() => { setResults(null); setActiveStep(0); }}>New Gap Assessment</button>
             <button className="secondary-button" onClick={() => setPage('obligations')}>Back to Obligation Extraction</button>
             <HomeButton setPage={setPage} />
@@ -535,6 +567,10 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
 
 export default function App() {
   const [page, setPage] = useState<Page>('home');
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [page]);
 
   return (
     <main>

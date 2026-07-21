@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.routers import crawler, gap, obligations
+from app.services.gap_service import pipeline_metadata
 
 settings = get_settings()
 
@@ -40,6 +41,7 @@ def root():
         "status": "ok",
         "app": settings.app_name,
         "message": "EY Regulatory Compliance Tool backend is running.",
+        "gap_pipeline": pipeline_metadata(),
     }
 
 
@@ -49,6 +51,7 @@ def health():
         "status": "ok",
         "app": settings.app_name,
         "fsca_directives_url": settings.fsca_directives_url,
+        "gap_pipeline": pipeline_metadata(),
         "utilities": [
             "Web Crawler",
             "Obligation Extraction",
