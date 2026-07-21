@@ -1,11 +1,11 @@
 from pathlib import Path
 import traceback
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
-from app.services.gap_service import review_policy_gaps
+from app.services import gap_service
 from app.services.storage import save_upload
 
 router = APIRouter(prefix="/api/gap", tags=["Policy Gap Reviewer"])
@@ -26,6 +26,7 @@ def available_registers():
 
 @router.post("/review")
 def gap_review(
+    response: Response,
     register_file: UploadFile | None = File(default=None, alias="register"),
     register_name: str | None = Form(default=None),
     policy: UploadFile = File(...),
@@ -45,7 +46,11 @@ def gap_review(
         else:
             raise HTTPException(status_code=400, detail="Select a generated register or upload an Excel/CSV register.")
         policy_path = save_upload(policy.file, policy.filename, settings.uploads_dir)
-        return review_policy_gaps(register_path, policy_path)
+        result = gap_service.review_policy_gaps(register_path, policy_path)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["X-Pipeline-Version"] = gap_service.PIPELINE_VERSION
+        response.headers["X-Pipeline-Run"] = result["pipeline"]["run_id"]
+        return result
     except HTTPException:
         raise
     except ValueError as exc:
@@ -64,4 +69,12 @@ def gap_output(filename: str):
     path = settings.output_dir / Path(filename).name
     if not path.exists():
         raise HTTPException(status_code=404, detail="Output file not found.")
-    return FileResponse(path, filename=path.name)
+    return FileResponse(
+        path,
+        filename=path.name,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "X-Pipeline-Version": gap_service.PIPELINE_VERSION,
+        },
+    )
