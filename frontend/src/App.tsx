@@ -19,9 +19,11 @@ type DirectiveRecord = {
 
 type Kpi = { label: string; value: string | number };
 type LogRow = { stage: string; status: string; message: string; row_count: number };
-type Results = { kpis: Kpi[]; tabs: Record<string, any>; logs: LogRow[]; output_files?: Record<string, string> };
+type PipelineInfo = { pipeline_version: string; run_id?: string; source_file?: string; source_sha256?: string };
+type Results = { kpis: Kpi[]; tabs: Record<string, any>; logs: LogRow[]; output_files?: Record<string, string>; pipeline?: PipelineInfo };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const REQUIRED_GAP_PIPELINE = '2026-07-21.3';
 
 function friendlyApiError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -488,13 +490,23 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
     setErrorMessage('');
     setActiveStep(1);
     try {
+      const healthResponse = await fetch(`${API_BASE}/api/health`, { cache: 'no-store' });
+      if (!healthResponse.ok) throw new Error(await readApiError(healthResponse));
+      const health = await healthResponse.json();
+      const activeVersion = health?.gap_pipeline?.pipeline_version;
+      if (activeVersion !== REQUIRED_GAP_PIPELINE) {
+        throw new Error(`The frontend reached gap pipeline ${activeVersion || 'unknown'}, but ${REQUIRED_GAP_PIPELINE} is required. Stop the stale backend or correct VITE_API_BASE_URL, then restart both servers.`);
+      }
       const form = new FormData();
       if (register) form.append('register', register);
       if (registerName) form.append('register_name', registerName);
       form.append('policy', policy);
-      const response = await fetch(`${API_BASE}/api/gap/review`, { method: 'POST', body: form });
+      const response = await fetch(`${API_BASE}/api/gap/review`, { method: 'POST', body: form, cache: 'no-store' });
       if (!response.ok) throw new Error(await readApiError(response));
       const data = await response.json();
+      if (data?.pipeline?.pipeline_version !== REQUIRED_GAP_PIPELINE || !data?.pipeline?.run_id) {
+        throw new Error('The assessment response has missing or stale pipeline provenance, so no workbook will be offered for download.');
+      }
       setResults(data);
       setActiveStep(2);
     } catch (error) {
@@ -531,6 +543,9 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
           summary="Review coverage status, supporting policy evidence, statistics, and processing notes in a compact workspace."
         >
           <KpiGrid kpis={results.kpis} />
+          <div className="status-banner success-banner">
+            Verified pipeline {results.pipeline?.pipeline_version} · Run {results.pipeline?.run_id} · Source {results.pipeline?.source_sha256?.slice(0, 16)}
+          </div>
           <div className="tabs">{['Gap Assessment', 'Statistics', 'Process Log'].map((name) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => setTab(name)}>{name}</button>)}</div>
           <TabScroll>
             {tab === 'Gap Assessment' && <><div className="filter-row inline-filters"><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>{statuses.map((x) => <option key={String(x)}>{String(x)}</option>)}</select></div><DataTable rows={filteredRows} /></>}
@@ -538,8 +553,8 @@ function GapPage({ setPage }: { setPage: (page: Page) => void }) {
             {tab === 'Process Log' && <DataTable rows={results.logs || []} />}
           </TabScroll>
           <div className="action-row compact-actions">
-            {results.output_files?.excel && <a className="primary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.excel}`}>Download Excel</a>}
-            {results.output_files?.csv && <a className="secondary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.csv}`}>Download CSV</a>}
+            {results.output_files?.excel && <a className="primary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.excel}?run=${encodeURIComponent(results.pipeline?.run_id || '')}`}>Download Excel</a>}
+            {results.output_files?.csv && <a className="secondary-button" href={`${API_BASE}/api/gap/outputs/${results.output_files.csv}?run=${encodeURIComponent(results.pipeline?.run_id || '')}`}>Download CSV</a>}
             <button className="ghost-button" onClick={() => { setResults(null); setActiveStep(0); }}>New Gap Assessment</button>
             <button className="secondary-button" onClick={() => setPage('obligations')}>Back to Obligation Extraction</button>
             <HomeButton setPage={setPage} />
