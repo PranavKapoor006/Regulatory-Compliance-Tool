@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -33,7 +36,20 @@ GAP_COLUMNS = REQUIRED_REGISTER_COLUMNS + [
     "Priority",
 ]
 VALID_STATUSES = ("Completely Covered", "Partially Covered", "Completely Missing")
-PIPELINE_VERSION = "2026-07-21.2"
+PIPELINE_VERSION = "2026-07-21.3"
+
+
+def pipeline_metadata(run_id: str = "") -> Dict[str, str]:
+    """Return verifiable provenance for the exact gap-review implementation."""
+    source_path = Path(__file__).resolve()
+    metadata = {
+        "pipeline_version": PIPELINE_VERSION,
+        "source_file": str(source_path),
+        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+    }
+    if run_id:
+        metadata["run_id"] = run_id
+    return metadata
 
 NEGATIVE_PHRASES = (
     "does not currently require",
@@ -822,6 +838,8 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
 
 
 def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]:
+    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
+    provenance = pipeline_metadata(run_id)
     register = load_register(register_path)
     policy_text, pages = extract_pdf_text(policy_path)
     if len(re.sub(r"\s+", "", policy_text)) < 50:
@@ -929,7 +947,8 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
     statistics = _statistics_frame(df_gap)
     method = "Gemini-assisted evidence review with deterministic validation" if gemini_count else "deterministic evidence review (Gemini unavailable or disabled)"
     logs = [
-        {"stage": "Select Inputs", "status": "Completed", "message": f"Pipeline {PIPELINE_VERSION}: validated register columns and loaded {policy_path.name}.", "row_count": len(register)},
+        {"stage": "Pipeline", "status": "Completed", "message": f"Pipeline {PIPELINE_VERSION}; run {run_id}; source SHA-256 {provenance['source_sha256'][:16]}.", "row_count": len(register)},
+        {"stage": "Select Inputs", "status": "Completed", "message": f"Validated register columns and loaded {policy_path.name}.", "row_count": len(register)},
         {"stage": "Evidence Retrieval", "status": "Completed", "message": f"Selected up to {candidate_limit} page-aware evidence candidates for each actionable obligation. {extraction_summary(pages)}", "row_count": len(tasks)},
         {"stage": "Gap Analysis", "status": "Completed", "message": f"Completed {method}. Gemini produced {gemini_count} validated assessment(s); remaining rows used the jurisdiction-aware fallback.", "row_count": len(df_gap)},
         {"stage": "Quality Control", "status": "Completed", "message": "Confirmed totals, evidence rules, repaired Directive 159 regression clauses, recommendation grammar, and mentor-facing workbook layout.", "row_count": len(df_gap)},
@@ -937,8 +956,10 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
     ]
 
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", register_path.stem).strip("_")
-    excel_path = output_path(f"{stem}_policy_gap_assessment.xlsx")
-    csv_path = output_path(f"{stem}_policy_gap_assessment.csv")
+    # A run-specific filename prevents browsers and proxies from serving an
+    # older workbook that happened to use the same output name.
+    excel_path = output_path(f"{stem}_{run_id}_policy_gap_assessment.xlsx")
+    csv_path = output_path(f"{stem}_{run_id}_policy_gap_assessment.csv")
     _write_excel(excel_path, df_gap, statistics, logs, method)
     df_gap.to_csv(csv_path, index=False)
 
@@ -955,6 +976,7 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
         return statistics[statistics["Dimension"] == dimension].drop(columns=["Dimension"]).to_dict(orient="records")
 
     return {
+        "pipeline": provenance,
         "kpis": kpis,
         "tabs": {
             "gap_assessment": df_gap.to_dict(orient="records"),
