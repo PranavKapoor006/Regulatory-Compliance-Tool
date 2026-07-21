@@ -171,8 +171,7 @@ FIELD_CANDIDATES = {
         "Publication_x0020_Date",
         "PublicationDate",
         "Date",
-        "Created",
-        "Modified",
+        "LaunchDate",
     ],
     "file_ref": [
         "FileRef",
