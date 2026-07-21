@@ -82,6 +82,12 @@ def _normalise_ocr_common(text: str) -> str:
         "diractive": "directive",
         "Registar": "Registrar",
         "Ragistrar": "Registrar",
+        "prior te": "prior to",
+        "relating ta": "relating to",
+        "persen te": "person to",
+        "govemance": "governance",
+        "iiability": "liability",
+        "seoured": "secured",
         "complyance": "compliance",
         "outsourci ": "outsourci",
         "out sourc": "outsourc",
@@ -288,6 +294,40 @@ def breakdown_regulatory_text(raw_text: str) -> List[Dict[str, str]]:
         if row["Section"] == "Introduction" and len(wording.split()) < 8:
             continue
         cleaned_rows.append(row)
+
+    for idx, row in enumerate(cleaned_rows, start=1):
+        row["Sequence"] = idx
+
+    # OCR sometimes keeps several consecutively numbered child clauses on one
+    # physical line. Split only later siblings of the current clause (for
+    # example 7.7.10 after 7.7.9), which avoids splitting legal cross-references.
+    split_rows: List[Dict[str, str]] = []
+    for row in cleaned_rows:
+        section = str(row["Section"])
+        wording = str(row["Language from Directive"])
+        parts = section.split(".")
+        if len(parts) < 2 or not all(part.isdigit() for part in parts):
+            split_rows.append(row)
+            continue
+        parent_prefix = ".".join(parts[:-1])
+        current_number = int(parts[-1])
+        marker_re = re.compile(rf"(?<![\d.])({re.escape(parent_prefix)}\.(\d+))\s+")
+        markers = [
+            match for match in marker_re.finditer(wording)
+            if int(match.group(2)) > current_number
+        ]
+        if not markers:
+            split_rows.append(row)
+            continue
+        starts = [0, *(match.start() for match in markers), len(wording)]
+        sections = [section, *(match.group(1) for match in markers)]
+        for split_index, (start, end) in enumerate(zip(starts, starts[1:])):
+            body = wording[start:end].strip()
+            if split_index:
+                body = marker_re.sub("", body, count=1).strip()
+            if body:
+                split_rows.append({**row, "Section": sections[split_index], "Language from Directive": body})
+    cleaned_rows = split_rows
 
     for idx, row in enumerate(cleaned_rows, start=1):
         row["Sequence"] = idx
