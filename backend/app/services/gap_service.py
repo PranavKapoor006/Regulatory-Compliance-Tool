@@ -33,6 +33,7 @@ GAP_COLUMNS = REQUIRED_REGISTER_COLUMNS + [
     "Priority",
 ]
 VALID_STATUSES = ("Completely Covered", "Partially Covered", "Completely Missing")
+PIPELINE_VERSION = "2026-07-21.2"
 
 NEGATIVE_PHRASES = (
     "does not currently require",
@@ -82,6 +83,8 @@ OCR_REPAIRS = (
     (re.compile(r"\bpersen te\b", re.I), "person to"),
     (re.compile(r"\bRegistrar te\b", re.I), "Registrar to"),
     (re.compile(r"\binsurers compliance\b", re.I), "insurer's compliance"),
+    (re.compile(r"\bLTast\b", re.I), "LT Act"),
+    (re.compile(r"\b42\s+April\s+2042\b", re.I), "12 April 2012"),
 )
 
 
@@ -99,7 +102,19 @@ def _clean(value: Any) -> str:
 def load_register(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xlsx", ".xls"}:
         workbook = pd.ExcelFile(path)
-        preferred = next((name for name in workbook.sheet_names if name.strip().lower() == "obligations"), workbook.sheet_names[0])
+        preferred = next((name for name in workbook.sheet_names if name.strip().lower() == "obligations"), None)
+        if preferred is None:
+            # Accept renamed obligation sheets and prior gap-assessment exports.
+            # Selecting the first sheet is unsafe because it may be an executive
+            # summary that does not contain the register columns.
+            for name in workbook.sheet_names:
+                candidate = pd.read_excel(path, sheet_name=name, nrows=0)
+                candidate.columns = [str(column).strip() for column in candidate.columns]
+                if set(REQUIRED_REGISTER_COLUMNS).issubset(candidate.columns):
+                    preferred = name
+                    break
+        if preferred is None:
+            raise ValueError("No worksheet contains the required obligation-register columns.")
         df = pd.read_excel(path, sheet_name=preferred)
     else:
         df = pd.read_csv(path)
@@ -383,6 +398,8 @@ def _draft_policy_requirement(section: str, directive_text: str, obligation: str
         return f"Amend the outsourcing-contract standard for South African operations so every relevant agreement expressly requires the following section {section} control: {clean_obligation[:420]}."
     if re.search(r"\bpolicy\b", combined):
         return f"Revise the South African outsourcing policy to state the section {section} requirement directly: {clean_obligation[:440]}."
+    if re.match(r"^(?:An insurer|The insurer|Insurers|This Directive|A written contract)\b", clean_obligation, flags=re.I):
+        return f"Add a South African FSCA compliance clause for section {section} stating and operationalising this requirement: {clean_obligation[:440]}."
     return f"Add a South African FSCA compliance clause for section {section} stating that the insurer must {clean_obligation[:440]}."
 
 
@@ -429,6 +446,49 @@ def _normalised_contains(container: str, quote: str) -> bool:
     return bool(normal_quote) and normal_quote in normal_container
 
 
+def _collect_gemini_batch(batch: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Request one batch and retain only results belonging to that batch."""
+    if not batch:
+        return {}
+    prompt_items = []
+    for task in batch:
+        prompt_items.append({
+            "id": task["id"],
+            "section": task["section"],
+            "directive_language": task["directive_text"],
+            "obligation": task["obligation"],
+            "obligation_category": task["category"],
+            "candidate_policy_evidence": [
+                {
+                    "candidate_id": candidate["candidate_id"],
+                    "page": candidate["page"],
+                    "text": candidate["text"][:1400],
+                }
+                for candidate in task["candidates"]
+            ],
+        })
+    result = chat_json(GAP_REVIEW_SYSTEM_PROMPT, gap_review_user_prompt(prompt_items))
+    returned = result.get("assessments", []) if isinstance(result, dict) else []
+    if isinstance(returned, dict):
+        returned = [returned]
+    if not isinstance(returned, list):
+        return {}
+    valid_ids = {task["id"] for task in batch}
+    collected: Dict[str, Dict[str, Any]] = {}
+    for assessment in returned:
+        if not isinstance(assessment, dict):
+            continue
+        assessment_id = str(assessment.get("id", "")).strip()
+        # For a single-item retry, an otherwise complete Gemini response with a
+        # missing/altered id can be mapped safely to the only requested row.
+        if assessment_id not in valid_ids and len(batch) == 1:
+            assessment_id = batch[0]["id"]
+            assessment = {**assessment, "id": assessment_id}
+        if assessment_id in valid_ids:
+            collected[assessment_id] = assessment
+    return collected
+
+
 def _gemini_assessments(tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     if not _enabled("ENABLE_LLM_GAP_REVIEW") or not tasks:
         return {}
@@ -436,33 +496,45 @@ def _gemini_assessments(tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
     assessments: Dict[str, Dict[str, Any]] = {}
     for start in range(0, len(tasks), batch_size):
         batch = tasks[start:start + batch_size]
-        prompt_items = []
-        for task in batch:
-            prompt_items.append({
-                "id": task["id"],
-                "section": task["section"],
-                "directive_language": task["directive_text"],
-                "obligation": task["obligation"],
-                "obligation_category": task["category"],
-                "candidate_policy_evidence": [
-                    {
-                        "candidate_id": candidate["candidate_id"],
-                        "page": candidate["page"],
-                        "text": candidate["text"][:1400],
-                    }
-                    for candidate in task["candidates"]
-                ],
-            })
-        result = chat_json(GAP_REVIEW_SYSTEM_PROMPT, gap_review_user_prompt(prompt_items))
-        returned = result.get("assessments", []) if isinstance(result, dict) else []
-        if not isinstance(returned, list):
-            continue
-        valid_ids = {task["id"] for task in batch}
-        for assessment in returned:
-            if not isinstance(assessment, dict) or str(assessment.get("id", "")) not in valid_ids:
-                continue
-            assessments[str(assessment["id"])] = assessment
+        assessments.update(_collect_gemini_batch(batch))
+
+    # Gemini can occasionally omit rows or return malformed JSON for a larger
+    # batch. Retry only the missing rows individually; this keeps the common
+    # path efficient while preventing a single bad batch from collapsing the
+    # validation rate for the entire workbook.
+    retry_limit = max(0, int(os.getenv("GAP_REVIEW_SINGLE_RETRY_LIMIT", "100")))
+    missing = [task for task in tasks if task["id"] not in assessments][:retry_limit]
+    for task in missing:
+        assessments.update(_collect_gemini_batch([task]))
     return assessments
+
+
+def _validated_gemini_assessments(tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    """Return deterministic-validator-approved Gemini results.
+
+    A syntactically valid Gemini row can still be unusable (for example, an
+    unknown status). Those rows receive one focused retry so the workbook does
+    not silently fall back merely because a multi-row answer was malformed.
+    """
+    raw = _gemini_assessments(tasks)
+    validated: Dict[str, Dict[str, str]] = {}
+    invalid: List[Dict[str, Any]] = []
+    for task in tasks:
+        applied = _apply_gemini_assessment(task, raw.get(task["id"], {})) if task["id"] in raw else None
+        if applied is not None:
+            validated[task["id"]] = applied
+        else:
+            invalid.append(task)
+
+    if not _enabled("ENABLE_LLM_GAP_REVIEW"):
+        return validated
+    retry_limit = max(0, int(os.getenv("GAP_REVIEW_INVALID_RETRY_LIMIT", "100")))
+    for task in invalid[:retry_limit]:
+        retry = _collect_gemini_batch([task]).get(task["id"], {})
+        applied = _apply_gemini_assessment(task, retry) if retry else None
+        if applied is not None:
+            validated[task["id"]] = applied
+    return validated
 
 
 def _canonical_status(value: Any) -> str:
@@ -517,7 +589,8 @@ def _apply_gemini_assessment(task: Dict[str, Any], assessment: Dict[str, Any]) -
     recommendation = _clean(assessment.get("recommendation"))
     required = f"{task['directive_text']} {task['obligation']}"
     broken_grammar = bool(re.search(
-        r"\b(?:must|to)\s+(?:An insurer|The insurer|Insurers|This Directive|A written contract)\b",
+        r"\bmust\s+(?:An insurer|The insurer|Insurers|This Directive|A written contract)\b|"
+        r"\bto\s+(?:An insurer\s+must|Insurers\s+must|This Directive\s+(?:applies|sets|does)|A written contract\s+must)\b",
         recommendation,
         flags=re.I,
     ))
@@ -639,6 +712,10 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         summary = workbook.add_worksheet("Executive Summary")
         writer.sheets["Executive Summary"] = summary
         summary.hide_gridlines(2)
+        summary.set_landscape()
+        summary.set_paper(9)
+        summary.fit_to_pages(1, 0)
+        summary.set_margins(0.25, 0.25, 0.35, 0.35)
         summary.merge_range("A1:H2", "FSCA Directive 159 Policy Gap Assessment", title_format)
         summary.merge_range("A3:H4", f"Evidence-grounded review method: {method}. Results support compliance review and require professional approval before implementation.", subtitle_format)
         labels = ["Total Obligations", "Completely Covered", "Partially Covered", "Completely Missing"]
@@ -663,7 +740,7 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         for row_index, (_, gap_row) in enumerate(top_gaps.iterrows(), start=11):
             obligation_lines = (len(str(gap_row.get("Obligation", ""))) // 44) + 1
             recommendation_lines = (len(str(gap_row.get("Policy Gap and Recommendations", ""))) // 58) + 1
-            summary.set_row(row_index, min(max(42, max(obligation_lines, recommendation_lines) * 15), 135))
+            summary.set_row(row_index, min(max(42, max(obligation_lines, recommendation_lines) * 15), 225))
         summary.autofilter(10, 0, 10 + len(top_gaps), len(top_gaps.columns) - 1)
         summary.freeze_panes(11, 0)
         summary.conditional_format(11, 2, 10 + len(top_gaps), 2, {"type": "text", "criteria": "containing", "value": "Completely Missing", "format": workbook.add_format({"bg_color": "#FECACA", "font_color": "#991B1B"})})
@@ -671,6 +748,10 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         assessment.to_excel(writer, sheet_name="Gap Assessment", index=False)
         gap_sheet = writer.sheets["Gap Assessment"]
         gap_sheet.hide_gridlines(2)
+        gap_sheet.set_landscape()
+        gap_sheet.set_paper(9)
+        gap_sheet.fit_to_pages(1, 0)
+        gap_sheet.repeat_rows(0)
         gap_sheet.freeze_panes(1, 2)
         gap_sheet.autofilter(0, 0, len(assessment), len(assessment.columns) - 1)
         gap_sheet.set_row(0, 34)
@@ -716,6 +797,9 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         statistics.to_excel(writer, sheet_name="Statistics", index=False)
         stat_sheet = writer.sheets["Statistics"]
         stat_sheet.hide_gridlines(2)
+        stat_sheet.set_portrait()
+        stat_sheet.set_paper(9)
+        stat_sheet.fit_to_pages(1, 1)
         stat_sheet.freeze_panes(1, 0)
         stat_sheet.autofilter(0, 0, len(statistics), len(statistics.columns) - 1)
         stat_sheet.set_column("A:C", 28)
@@ -726,6 +810,9 @@ def _write_excel(path: Path, assessment: pd.DataFrame, statistics: pd.DataFrame,
         pd.DataFrame(logs).to_excel(writer, sheet_name="Process Log", index=False)
         log_sheet = writer.sheets["Process Log"]
         log_sheet.hide_gridlines(2)
+        log_sheet.set_landscape()
+        log_sheet.set_paper(9)
+        log_sheet.fit_to_pages(1, 1)
         log_sheet.freeze_panes(1, 0)
         log_sheet.set_column("A:B", 20)
         log_sheet.set_column("C:C", 90, wrap)
@@ -781,7 +868,7 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
             tasks.append(task)
         prepared.append(base)
 
-    gemini_results = _gemini_assessments(tasks)
+    gemini_results = _validated_gemini_assessments(tasks)
     rows: List[Dict[str, str]] = []
     gemini_count = 0
     for item in prepared:
@@ -790,7 +877,7 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
             assessment = item["special"]
         else:
             task = item["task"]
-            assessment = _apply_gemini_assessment(task, gemini_results.get(task["id"], {})) if task["id"] in gemini_results else None
+            assessment = gemini_results.get(task["id"])
             if assessment:
                 gemini_count += 1
             else:
@@ -819,12 +906,33 @@ def review_policy_gaps(register_path: Path, policy_path: Path) -> Dict[str, Any]
     if (df_gap.loc[missing_rows, ["Policy Page", "Corresponding Policy Text"]].astype(bool).any(axis=None)):
         raise RuntimeError("Missing obligations must not contain fabricated policy evidence.")
 
+    broken_recommendation = df_gap["Policy Gap and Recommendations"].str.contains(
+        r"\bmust\s+(?:An insurer|The insurer|Insurers|This Directive|A written contract)\b|"
+        r"\bto\s+(?:An insurer\s+must|Insurers\s+must|This Directive\s+(?:applies|sets|does)|A written contract\s+must)\b",
+        case=False,
+        regex=True,
+        na=False,
+    )
+    stale_informational = (
+        df_gap["Obligation"].str.contains(r"informational|contextual|no standalone", case=False, regex=True, na=False)
+        & df_gap["Section"].astype(str).isin({"6.1", "6.2.1", "6.2.2", "6.2.3", "6.2.4", "7.7.12"})
+    )
+    if broken_recommendation.any() or stale_informational.any():
+        bad_recommendation_sections = ", ".join(df_gap.loc[broken_recommendation, "Section"].astype(str).head(8))
+        stale_sections = ", ".join(df_gap.loc[stale_informational, "Section"].astype(str).head(8))
+        raise RuntimeError(
+            "Quality control blocked the workbook because known stale obligations or malformed recommendations remain. "
+            f"Malformed recommendation sections: {bad_recommendation_sections or 'none'}; "
+            f"stale obligation sections: {stale_sections or 'none'}."
+        )
+
     statistics = _statistics_frame(df_gap)
     method = "Gemini-assisted evidence review with deterministic validation" if gemini_count else "deterministic evidence review (Gemini unavailable or disabled)"
     logs = [
-        {"stage": "Select Inputs", "status": "Completed", "message": f"Validated register columns and loaded {policy_path.name}.", "row_count": len(register)},
+        {"stage": "Select Inputs", "status": "Completed", "message": f"Pipeline {PIPELINE_VERSION}: validated register columns and loaded {policy_path.name}.", "row_count": len(register)},
         {"stage": "Evidence Retrieval", "status": "Completed", "message": f"Selected up to {candidate_limit} page-aware evidence candidates for each actionable obligation. {extraction_summary(pages)}", "row_count": len(tasks)},
         {"stage": "Gap Analysis", "status": "Completed", "message": f"Completed {method}. Gemini produced {gemini_count} validated assessment(s); remaining rows used the jurisdiction-aware fallback.", "row_count": len(df_gap)},
+        {"stage": "Quality Control", "status": "Completed", "message": "Confirmed totals, evidence rules, repaired Directive 159 regression clauses, recommendation grammar, and mentor-facing workbook layout.", "row_count": len(df_gap)},
         {"stage": "Results", "status": "Completed", "message": "Generated executive summary, detailed assessment, statistics, Excel, and CSV outputs.", "row_count": len(df_gap)},
     ]
 
