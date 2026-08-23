@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -34,8 +33,21 @@ def save_upload(file_obj, filename: str, target_folder: Path | None = None) -> P
     settings = get_settings()
     folder = target_folder or settings.uploads_dir
     target = unique_path(folder, filename)
-    with target.open("wb") as out:
-        shutil.copyfileobj(file_obj, out)
+    limit = settings.max_upload_mb * 1024 * 1024
+    total = 0
+    try:
+        with target.open("wb") as out:
+            while chunk := file_obj.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError(f"Upload exceeds the {settings.max_upload_mb} MB file-size limit.")
+                out.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    if total == 0:
+        target.unlink(missing_ok=True)
+        raise ValueError("The uploaded file is empty.")
     return target
 
 
@@ -56,3 +68,4 @@ def list_files(folder: Path, extensions: Iterable[str] | None = None) -> list[di
 def output_path(filename: str) -> Path:
     settings = get_settings()
     return unique_path(settings.output_dir, filename)
+

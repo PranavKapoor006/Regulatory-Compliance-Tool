@@ -1,144 +1,203 @@
-# FSCA Regulatory Compliance Tool
+# RegulaMosaic
 
-A modular compliance utility suite for FSCA regulatory directives with three connected workflows:
+Demo handover release: `2026-08-23.1`
 
-1. **Web Crawler** - discovers and downloads FSCA directives from the configured source URL.
-2. **Obligation Extraction** - breaks a directive into clause-wise regulatory text and generates an obligation register.
-3. **Policy Gap Reviewer** - compares obligations against an uploaded internal policy and generates a coverage/gap assessment.
+RegulaMosaic is a local regulatory-intelligence workspace for extracting traceable obligations and comparing them with internal-policy evidence. This handover combines the validated `2026-08-06.2` extraction pipeline with the jurisdiction-neutral `2026-08-18.2-neutral-recommendations` gap-review pipeline and the final mentor-approved interface.
 
-This is the initial project foundation. It includes working backend routes, a professional dark-mode frontend shell, file upload/download flows, regulatory text breakdown logic, baseline obligation generation, and baseline policy matching.
+This local web application supports a review workflow with three utilities:
 
-## Project Structure
+1. **FSCA Directive Library** — opens a checksummed, offline collection of 50 demo-ready official PDFs by topic.
+2. **Obligation Extraction** — converts native or scanned directive PDFs into clause-level obligation registers with source-page traceability.
+3. **Policy Gap Reviewer** — compares actionable obligations with internal-policy evidence and produces coverage findings and targeted recommendations.
+
+AI-generated results are review assistance, not legal advice. At least one qualified compliance professional must review every output before use or implementation.
+
+## Validated component versions
+
+- Obligation extraction: `2026-08-06.2`
+- Policy gap review: `2026-08-18.2-neutral-recommendations`
+- Controlled benchmark: `2026-07-27.5`
+- Offline PDF directive library: `2026-08-23-demo.1`
+- Demo handover packaging and UI presentation: `2026-08-23.1`
+
+## Offline directive library
+
+All demo files are installed under `backend/bundled_directives/` and validated at startup against `manifest.json`. Legacy Word form/annexure files are intentionally excluded from this demo repository because they are not accepted by the extraction workflow and may contain sensitive form fields.
+
+| Topic | Verified PDFs |
+|---|---:|
+| Insurer / Micro Insurer | 40 |
+| Joint FSCA / PA Directives | 2 |
+| Retirement Fund | 8 |
+| **Total** | **50** |
+
+Selecting or filtering a topic is a local operation and sends zero FSCA requests. There is no pull or refresh step. Every bundled file is a validated PDF and can be offered directly to Obligation Extraction.
+
+## Project structure
 
 ```text
 backend/
   app/
-    core/config.py
-    models/schemas.py
-    routers/crawler.py
-    routers/obligations.py
-    routers/gap.py
+    core/
+    routers/
     services/
-      crawler_service.py
-      pdf_service.py
-      breakdown_service.py
-      obligation_service.py
-      gap_service.py
-  requirements.txt
+  bundled_directives/       # 50 verified official PDFs plus integrity manifest
+  tests/
   .env.example
+  requirements.txt
   run.py
+benchmark/
+  aegis_v2/                 # verified full-population assessment
+  run_benchmark.py
+  run_aegis_benchmark.py
 frontend/
-  src/App.tsx
-  src/App.css
-  src/main.tsx
+  src/
   package.json
+  package-lock.json
+  vite.config.ts
 docs/
-  architecture_plan.md
-  testing_checklist.md
+verify_running_app.ps1
 ```
 
-## Setup
+Runtime folders, virtual environments, dependency folders, secrets, and generated outputs are intentionally excluded from the handover archive.
 
-### Backend
+## Windows setup
+
+### Prerequisites
+
+- Python 3.12
+- Node.js 20 or later
+- Tesseract OCR for scanned/rotated PDFs
+
+Install Tesseract if required:
 
 ```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-python run.py
+winget install UB-Mannheim.TesseractOCR
 ```
 
-Backend runs at:
-
-```text
-http://127.0.0.1:8000
-```
-
-### Frontend
+### 1. Backend
 
 ```powershell
-cd frontend
-npm.cmd install
+cd C:\path\to\FSCA-Regulatory-Compliance-Tool\backend
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Keep this window open. Confirm the API at `http://127.0.0.1:8000/api/health`.
+
+### 2. Frontend
+
+Open a second PowerShell window:
+
+```powershell
+cd C:\path\to\FSCA-Regulatory-Compliance-Tool\frontend
+npm.cmd ci
 npm.cmd run dev
 ```
 
-Frontend runs at:
+Open `http://localhost:5173`. The Vite development server proxies `/api` to `http://127.0.0.1:8000`.
+
+### 3. Optional Gemini review
+
+The application works without an AI key. `ENABLE_LLM_EXTRACTION` and `ENABLE_LLM_GAP_REVIEW` are disabled by default. Before enabling Gemini, confirm the organization’s data-handling requirements because selected directive and policy text will be sent to the configured provider.
+
+Update `backend/.env` only when approved:
 
 ```text
-http://localhost:5173/
+ENABLE_LLM_GAP_REVIEW=true
+GEMINI_API_KEY=
 ```
 
-## Environment Variables
+## User workflow
 
-Use `backend/.env.example` as the template.
+1. Open **Library** and select one of the three topics. Confirm `40/40`, `2/2`, or `8/8`.
+2. Open **Obligations**, select a bundled PDF or upload a directive/circular PDF, and run extraction.
+3. Review the obligation register, sanitized source breakdown, statistics, review flags, and process log. Download Excel or CSV. The export is blocked if high-confidence OCR/page artifacts remain.
+4. Open **Gap Review**, select the generated register or upload another register, then upload the internal-policy PDF.
+5. Review coverage statuses, exact evidence citations, missing elements, recommendations, and manual-review flags. Download Excel or CSV.
+6. Have a qualified compliance professional validate the output before use.
 
-```text
-APP_NAME=FSCA Regulatory Compliance Tool
-FRONTEND_ORIGIN=http://localhost:5173
-FSCA_DIRECTIVES_URL=https://www2.fsca.co.za/Regulatory%20Frameworks/Pages/Directives.aspx
-STORAGE_ROOT=storage
-MAX_UPLOAD_MB=75
+## Output files
+
+Obligation extraction workbook:
+
+- `Obligations`
+- `Accuracy Review` (row-level internal quality information)
+- `Text Breakdown`
+- `Statistics`
+- `Process Log`
+
+Policy gap workbook:
+
+- `Executive Summary`
+- `Gap Assessment`
+- `Statistics`
+- `Process Log`
+
+Client-facing dashboards and executive summaries use factual counts rather than overall accuracy/confidence percentages. Row-level internal quality fields remain available for validation and testing.
+
+## Verification
+
+Run all backend tests:
+
+```powershell
+cd C:\path\to\FSCA-Regulatory-Compliance-Tool\backend
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-## Text Breakdown Logic
+Build the frontend:
 
-The regulatory text breakdown is performed before obligation generation.
-
-Current logic:
-
-- Extract PDF text page-wise.
-- Normalize whitespace while preserving line boundaries.
-- Detect digit-based clause markers only at the beginning of a logical line.
-- Supported markers include `1`, `1.`, `2.1`, `2.2`, and `2.2.1`.
-- Hierarchical references are preserved as section identifiers.
-- Text before the first numbered clause is stored as `Introduction`.
-- Numbers inside dates, amounts, percentages, and sentences are not split because they do not appear as line-start clause markers.
-
-## Output Structures
-
-### Obligation Register
-
-```text
-Section
-Language from Directive
-Obligation
-Obligation Category
-Primary Responsible Department
-Support Function
-Priority
-Actionable
+```powershell
+cd C:\path\to\FSCA-Regulatory-Compliance-Tool\frontend
+npm.cmd run build
 ```
 
-### Policy Gap Assessment
+Run the controlled Directive 159 benchmark:
 
-```text
-Section
-Language from Directive
-Obligation
-Obligation Category
-Primary Responsible Department
-Support Function
-Coverage Status
-Policy Gap and Recommendations
-Policy Page
-Corresponding Policy Text
-Priority
+```powershell
+cd C:\path\to\FSCA-Regulatory-Compliance-Tool
+backend\.venv\Scripts\python.exe benchmark\run_benchmark.py
 ```
 
-## Notes
+Run the Aegis full-population benchmark:
 
-- The current obligation extraction and gap reviewer use deterministic baseline logic so that the end-to-end workflow can be tested without an LLM dependency.
-- The crawler is designed to use the configured FSCA Directives page. Website structure may require selector tuning after live testing.
-- The policy gap reviewer only uses evidence from the uploaded policy PDF. It does not fabricate supporting policy text.
-- Completely covered obligations do not receive unnecessary remediation recommendations.
-- Not applicable/informational items return a reasoning sentence rather than plain `NA`.
+```powershell
+backend\.venv\Scripts\python.exe benchmark\run_aegis_benchmark.py `
+  benchmark\aegis_v2\Aegis_v2_Verified_Assessment_2026-07-27.5.xlsx
+```
 
-## Next Implementation Milestones
+With the backend running, execute the release verifier:
 
-1. Validate crawler parsing against the live FSCA page.
-2. Improve obligation generation quality using a configurable AI/LLM layer if approved.
-3. Add richer Excel formatting and dashboard-style statistics sheets.
-4. Add screenshots and generated sample outputs after first full workflow test.
-5. Add automated tests for text breakdown and column validation.
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\verify_running_app.ps1
+```
+
+Expected release checks include:
+
+- obligation pipeline `2026-08-06.2`;
+- gap pipeline `2026-08-18.2-neutral-recommendations` and controlled benchmark `2026-07-27.5`;
+- offline PDF library `2026-08-23-demo.1`;
+- 50 bundled PDFs with exact `40 / 2 / 8` populations;
+- zero runtime FSCA requests; and
+- no pull/refresh controls.
+
+## Controlled validation scope
+
+The controlled Directive 159 benchmark verifies 56 known-answer coverage classifications, evidence grounding, missing elements, 66 recommendation packages, and 10 extraction checks. The Aegis benchmark verifies all 75 actionable rows and eight intentionally seeded policy shortcomings.
+
+These results prove regression performance on known-answer fixtures. They do not establish legal accuracy for arbitrary regulators, directives, or internal policies.
+
+## Known limitations
+
+- OCR quality depends on scan quality and installed Tesseract language data. The export sanitizer removes high-confidence page headers, footnotes, and OCR debris without replacing qualified source review.
+- The first OCR pass can be CPU-intensive; cached repeats are faster.
+- Legacy Word form/annexure files are excluded from the demo repository; retain any approved archival copies outside GitHub if they are needed later.
+- Taxonomy, jurisdiction, client output schema, and model settings may require configuration for a new client.
+- Gemini usage is subject to provider token/quota limits and approved data-handling rules.
+- Professional review remains mandatory for every production output.
+
+See `docs/TEST_EVIDENCE.md` and `FINAL_HANDOVER_CHECKLIST.md` for the executed release gates and recipient checklist.
