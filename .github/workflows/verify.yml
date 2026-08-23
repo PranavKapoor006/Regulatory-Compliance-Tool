@@ -15,6 +15,10 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: backend/requirements.txt
+      - name: Install OCR runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
       - run: python -m pip install -r backend/requirements.txt
       - run: python -m unittest discover -s tests -q
         working-directory: backend
