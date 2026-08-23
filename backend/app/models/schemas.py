@@ -40,3 +40,4 @@ class ResultsPayload(BaseModel):
     tabs: Dict[str, Any]
     logs: List[ProcessLogEntry]
     output_files: Dict[str, str] = Field(default_factory=dict)
+
